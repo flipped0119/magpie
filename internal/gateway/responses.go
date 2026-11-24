@@ -1593,6 +1593,17 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 	} else if r.Thinking {
 		out["reasoning"] = map[string]any{"summary": "auto"}
 	}
+	if host == "chatgpt.com" && r.Stream && (r.Thinking || (r.Effort != "" && r.Effort != "none")) {
+		// Enable live reasoning_summary_text.delta streaming on ChatGPT Codex
+		// backend so Claude Code sees thinking progress incrementally.
+		if so, ok := out["stream_options"].(map[string]any); ok {
+			if _, set := so["reasoning_summary_delivery"]; !set {
+				so["reasoning_summary_delivery"] = "sequential_cutoff"
+			}
+		} else {
+			out["stream_options"] = map[string]any{"reasoning_summary_delivery": "sequential_cutoff"}
+		}
+	}
 	// the client's include goes on as the request would have without
 	// magpie. Sealed reasoning is asked for only with reasoning, as Codex
 	// asks for it: OpenAI refuses it of a model that doesn't reason. What

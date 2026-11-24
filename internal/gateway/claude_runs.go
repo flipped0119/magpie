@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/yetone/magpie/internal/lowmem"
 )
 
 // ClaudeRunsPath is where the gateway lists its Claude Code runs.
@@ -76,7 +78,7 @@ func (b *subscriptionBridge) claudeRunList() ClaudeRuns {
 		all = append(all, s)
 	}
 	b.mu.Unlock()
-	out := ClaudeRuns{Object: "claude-runs", Runs: []ClaudeRun{}, IdleMost: idleMost, IdleFor: idleLongest}
+	out := ClaudeRuns{Object: "claude-runs", Runs: []ClaudeRun{}, IdleMost: lowmem.ClaudeIdleMax(idleMost), IdleFor: lowmem.ClaudeIdleTTL(idleLongest)}
 	for _, s := range all {
 		r := s.run
 		r.mu.Lock()

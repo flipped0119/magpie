@@ -315,8 +315,13 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	}
 	entry := func(read SubscriptionQuota) loginUsageEntry {
 		q := read
-		if q.Error != "" && ok && q.Provider != "claude" {
-			q = e.q // a hiccup keeps what was known
+		if q.Error != "" && ok && e.q.Error == "" && (q.Provider != "claude" || !claudeDenied(q.Error)) {
+			// Failed read is unknown, not empty: keep the last known good reading
+			// across non-denial transient errors (including Claude), while still
+			// recording ReadError for callers that inspect probe health.
+			kept := e.q
+			kept.ReadError = q.Error
+			q = kept
 		}
 		return loginUsageEntry{at: time.Now(), q: q, read: read}
 	}

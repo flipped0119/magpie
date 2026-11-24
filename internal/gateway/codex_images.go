@@ -23,6 +23,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -180,7 +181,7 @@ func fitAll(jobs []fitJob) {
 	for n, i := range order {
 		holds[n] = fitHolds(jobs[i].url)
 	}
-	for _, b := range fitInHand(holds, fitBudget) {
+	for _, b := range fitInHand(holds, lowmem.CodexImageBudget(fitBudget)) {
 		fitBatch(jobs, order[b[0]:b[1]], made)
 	}
 	for _, i := range order {

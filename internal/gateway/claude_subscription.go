@@ -70,6 +70,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/egress"
 	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -1422,7 +1423,21 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	}
 	// A caller may abandon a turn after receiving tool_use. Do not leave the
 	// parked Claude process and MCP request alive forever.
-	run.timer = time.AfterFunc(runTimeout, func() { run.abortFor("it waited as long as it may") })
+	run.timer = time.AfterFunc(runTimeout, func() {
+		// In low-memory mode (shorter idle TTL than 1h), shelve an idle run's
+		// session ID before ending the subprocess so the next turn resumes
+		// into Anthropic's warm 1h prompt cache while freeing 250-500 MB RSS.
+		if lowmem.ClaudeIdleTTL(idleLongest) < idleLongest {
+			b.mu.Lock()
+			if run.idleKey != "" && b.idle[run.idleKey] == run {
+				b.shelve(run)
+				delete(b.idle, run.idleKey)
+				run.idleKey = ""
+			}
+			b.mu.Unlock()
+		}
+		run.abortFor("it waited as long as it may")
+	})
 	run.ends = time.Now().Add(runTimeout)
 	segment := run.attach()
 	b.mu.Lock()
@@ -2733,7 +2748,7 @@ func (r *subscriptionRun) ended(req *Request, said, stop string, ok bool) {
 	if !r.bridge.keepIdle(r, key, conv) {
 		return // it ended during its reply (#1667)
 	}
-	r.endIn(idleLongest)
+	r.endIn(lowmem.ClaudeIdleTTL(idleLongest))
 }
 
 // keepIdle leaves run waiting for the turn after the conversation key
@@ -2777,7 +2792,8 @@ func (b *subscriptionBridge) keepIdle(r *subscriptionRun, key, conv string) bool
 	if conv != "" {
 		r.convKey = conv
 	}
-	for len(b.idle) > idleMost {
+	maxIdle := lowmem.ClaudeIdleMax(idleMost)
+	for len(b.idle) > maxIdle {
 		var oldKey string
 		var oldest *subscriptionRun
 		for k, run := range b.idle {
@@ -2797,7 +2813,7 @@ func (b *subscriptionBridge) keepIdle(r *subscriptionRun, key, conv string) bool
 	}
 	b.mu.Unlock()
 	for _, run := range drop {
-		run.abortFor("another run was kept in its place (" + strconv.Itoa(idleMost) + " wait at most)")
+		run.abortFor("another run was kept in its place (" + strconv.Itoa(maxIdle) + " wait at most)")
 	}
 	claudeRoom.nudge() // an ask waiting for room may let it go
 	return true
@@ -3803,7 +3819,7 @@ func (r *subscriptionRun) letGo() {
 	r.asked, r.shown, r.parkedAt = nil, nil, time.Time{}
 	clear(r.early)
 	r.mu.Unlock()
-	r.endIn(idleLongest)
+	r.endIn(lowmem.ClaudeIdleTTL(idleLongest))
 	log.Printf("claude: the turn the client gave up on was taken back; its run waits for the conversation's next turn")
 }
 
@@ -3949,11 +3965,12 @@ func (r *subscriptionRun) park() {
 		}
 	}
 	b.mu.Unlock()
-	if len(parked) <= parkedMost {
+	maxParked := lowmem.ClaudeParkedMax(parkedMost)
+	if len(parked) <= maxParked {
 		return
 	}
 	slices.SortFunc(parked, func(a, b waiting) int { return a.at.Compare(b.at) })
-	for _, w := range parked[:len(parked)-parkedMost] {
+	for _, w := range parked[:len(parked)-maxParked] {
 		w.run.abort()
 	}
 }

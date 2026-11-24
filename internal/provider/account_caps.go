@@ -132,6 +132,10 @@ type WindowCaps struct {
 	// instead, by WindowCapID (AccountWindowAmounts)
 	Amounts map[string]float64
 	Credits bool
+	// RandomGate optionally supplies a deterministic per-account, per-window
+	// randomized stop line when neither All nor Windows[name] nor Amounts[name]
+	// sets an explicit cap (and Windows[name] is not 100-exempt).
+	RandomGate *RandomQuotaGate
 }
 
 // WindowCapID is how a window is known to its cap: its name, trimmed, in
@@ -159,15 +163,31 @@ func (c WindowCaps) Of(name string) (share int, credits bool) {
 // count: amount is then the cap in the window's unit, and share that
 // amount as a share of the window's total of. A window read without a
 // total (of 0) leaves its amount aside.
-func (c WindowCaps) limitShare(name string, of float64, aside bool) (share float64, credits bool, amount float64) {
+func (c WindowCaps) limitShareAt(name string, of float64, aside bool, resets time.Time) (share float64, credits bool, amount float64) {
 	if a := c.Amounts[WindowCapID(name)]; a > 0 && of > 0 {
 		return a / of * 100, false, a
 	}
 	if aside {
 		return float64(c.own(name)), false, 0
 	}
+	// Explicit user 100% exemption on this window disables RandomGate too.
+	if c.Windows[WindowCapID(name)] >= 100 {
+		if c.Credits {
+			return 100, true, 0
+		}
+		return 0, false, 0
+	}
 	n, credits := c.Of(name)
+	if n <= 0 && c.RandomGate != nil {
+		if rnd := c.RandomGate.Threshold(name, resets); rnd > 0 {
+			return float64(rnd), false, 0
+		}
+	}
 	return float64(n), credits, 0
+}
+
+func (c WindowCaps) limitShare(name string, of float64, aside bool) (share float64, credits bool, amount float64) {
+	return c.limitShareAt(name, of, aside, time.Time{})
 }
 
 // past says whether a window at used percent, count of its unit, is at or
@@ -195,7 +215,7 @@ func (c WindowCaps) own(name string) int {
 // Holds says whether any window can hold the account before the vendor
 // does.
 func (c WindowCaps) Holds() bool {
-	if c.All > 0 || c.Credits {
+	if c.All > 0 || c.Credits || c.RandomGate != nil {
 		return true
 	}
 	for _, v := range c.Amounts {
@@ -222,16 +242,24 @@ func (p Provider) CapsOf(user string) WindowCaps {
 		}
 	}
 	k := accountKey(user)
-	return WindowCaps{All: caps[k], Windows: wins[k], Amounts: amts[k]}
+	wc := WindowCaps{All: caps[k], Windows: wins[k], Amounts: amts[k]}
+	if p.ID == "claude" {
+		wc.RandomGate = envClaudeRandomGate(user)
+	}
+	return wc
 }
 
 // AccountCapsOf is CapsOf of the provider id.
 func AccountCapsOf(id, user string) WindowCaps {
+	var wc WindowCaps
 	if s, ok := storedPicks(id); ok {
 		k := accountKey(user)
-		return WindowCaps{All: s.AccountCaps[k], Windows: s.AccountWindowCaps[k], Amounts: s.AccountWindowAmounts[k]}
+		wc = WindowCaps{All: s.AccountCaps[k], Windows: s.AccountWindowCaps[k], Amounts: s.AccountWindowAmounts[k]}
 	}
-	return WindowCaps{}
+	if id == "claude" {
+		wc.RandomGate = envClaudeRandomGate(user)
+	}
+	return wc
 }
 
 // SetWindowCap sets the share of the window named window of the account ref
@@ -528,7 +556,7 @@ func (a Allowance) CapHeld(model string, caps WindowCaps, now time.Time) *CapHol
 		if l.extra {
 			continue // held by extraCapped's 100%, not by itself
 		}
-		share, credits, amount := caps.limitShare(l.Name, l.Of, l.aside)
+		share, credits, amount := caps.limitShareAt(l.Name, l.Of, l.aside, l.Resets)
 		if !past(share, amount, l.Used, l.Amount) {
 			continue
 		}
@@ -597,7 +625,7 @@ func (a Allowance) NearCap(model string, caps WindowCaps, points float64, now ti
 	model = strings.ToLower(model)
 	caps = a.extraCapped(model, caps, now)
 	for _, l := range a.capLimits(model) {
-		share, _, amount := caps.limitShare(l.Name, l.Of, l.aside)
+		share, _, amount := caps.limitShareAt(l.Name, l.Of, l.aside, l.Resets)
 		if share <= 0 || l.Used < share-points && (amount <= 0 || l.Amount < amount) {
 			continue
 		}
@@ -615,7 +643,11 @@ func (a Allowance) NearCap(model string, caps WindowCaps, points float64, now ti
 // caps reach nothing.
 func capReached(q SubscriptionQuota, caps WindowCaps, now time.Time) bool {
 	for _, w := range q.Windows {
-		share, _, amount := caps.limitShare(w.Name, w.Limit, false)
+		var resets time.Time
+		if w.ResetsAt != nil {
+			resets = *w.ResetsAt
+		}
+		share, _, amount := caps.limitShareAt(w.Name, w.Limit, false, resets)
 		if w.Aside || w.Model != "" || !past(share, amount, w.Used, w.Amount) {
 			continue
 		}

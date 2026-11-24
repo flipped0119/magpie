@@ -1161,6 +1161,13 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET "+StatuslinePath, s.statusline)
 	mux.HandleFunc("POST "+StatuslinePath, s.statusline)
+	// AsterGate-compatible self-usage & zero-404 Claude Code CLI control endpoints
+	mux.HandleFunc("GET "+MeUsagePath, s.meUsage)
+	mux.HandleFunc("GET "+V1MeUsagePath, s.meUsage)
+	mux.HandleFunc("GET "+ManagedSettingsPath, s.managedSettings)
+	mux.HandleFunc("POST /api/event_logging", s.eventLoggingSink)
+	mux.HandleFunc("POST /api/event_logging/batch", s.eventLoggingSink)
+	mux.HandleFunc("POST /api/event_logging/v2/batch", s.eventLoggingSink)
 	mux.HandleFunc("GET /v1/magpie/trace", s.gatewayTrace)
 	mux.HandleFunc("GET "+routeSnapshotPath, s.routeSnapshot)
 	mux.HandleFunc("GET "+routeEventsPath, s.routeEvents)
@@ -6089,7 +6096,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a compaction a rule sent to a model of its own leaves the
 			// conversation, and the turn's size, where they were
 			if hit == nil || !hit.Compact {
-				answeredStanding(stuck, c, aff.Turn, call.Usage, standsInFor(c, plannedCs, plannedOrder))
+				answeredWithDetour(stuck, c, aff.Turn, call.Usage, standsInFor(c, plannedCs, plannedOrder), aff.Kept, plannedCs, plannedOrder)
 				// what it answered, it holds: whatever it refused as too
 				// long on the way is forgotten (#3453)
 				forgetOverflow(stuck, c)
@@ -6864,7 +6871,15 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 					req.Header[k] = slices.Clone(vs)
 				}
 			}
+			if strings.EqualFold(strings.TrimSpace(in.Get("X-Anthropic-Additional-Protection")), "true") {
+				req.Header.Set("X-Anthropic-Additional-Protection", "true")
+			}
 			req.Header.Set("User-Agent", ua)
+		}
+		if bytes.Contains(body, []byte(`"ttl":"1h"`)) &&
+			s.fits(p.ID, betaKey(extendedCacheTTLBeta), to) &&
+			!slices.Contains(betas, extendedCacheTTLBeta) {
+			betas = append(betas, extendedCacheTTLBeta)
 		}
 		if len(betas) > 0 {
 			req.Header.Set("anthropic-beta", strings.Join(betas, ","))
@@ -7426,6 +7441,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			// vendor's model: its prompt cache missed from the first
 			// byte (#1600, billing_line.go)
 			body = withoutBillingLine(body)
+			// Do not leak Claude Code's raw Anthropic device/account user_id
+			// to third-party vendors while keeping per-caller cache affinity.
+			body = anonymizeThirdPartyUserID(body)
+		}
+		if anthropicModel.MatchString(model) {
+			body = normalizeAnthropicCacheControl(body)
+			body = placeClaudeContextBreakpoint(body)
 		}
 		if anthropicReplaysThinking(p.VendorHost(), model) || anthropicReplaysThinking(p.VendorHost(), upstream) {
 			// a tool_use turn with no thinking, or Claude's redacted
@@ -9680,9 +9702,15 @@ func refusesField(status int, body []byte, field string) bool {
 const hourMarksRefused = "cache_control.ttl"
 
 // hourMarksRefusal is a 400 over a cache mark's ttl: a relay that knows no
-// ttl, or a 1h mark after a 5m one.
+// ttl, rejects extended-cache-ttl beta, or rejects a 1h mark after a 5m one.
 func hourMarksRefusal(status int, b []byte) bool {
-	return badRequest(status) && bodyHas(b, "ttl") && bodyHas(b, "cache_control")
+	if !badRequest(status) {
+		return false
+	}
+	if bodyHas(b, "ttl") && bodyHas(b, "cache_control") {
+		return true
+	}
+	return bodyHas(b, "extended-cache-ttl") || bodyHas(b, "invalid beta flag")
 }
 
 // tierField is the client's service tier as a request carries it upstream
