@@ -6,6 +6,7 @@ import (
 	_ "embed"
 
 	"github.com/yetone/magpie/internal/cli"
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/notices"
 	// the built-in plugins, registered with the runtime (internal/pluginrt)
 	_ "github.com/yetone/magpie/plugins/all"
@@ -23,6 +24,7 @@ var version = "dev"
 var thirdParty string
 
 func main() {
+	lowmem.ApplyRuntimeTuning()
 	notices.Text = thirdParty
 	cli.Main(version)
 }

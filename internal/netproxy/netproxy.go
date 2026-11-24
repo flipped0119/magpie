@@ -78,17 +78,31 @@ func Func(req *http.Request) (*url.URL, error) {
 	if err := Held(req.Context()); err != nil {
 		return nil, err
 	}
-	if loopback(req.URL.Hostname()) {
+	host := req.URL.Hostname()
+	if loopback(host) {
 		return nil, nil
 	}
 	if c := choiceOf(req.Context()); c != "" {
-		return forChoice(c)
+		p, err := forChoice(c)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil && RequireProxy() && !onLAN(host) {
+			return nil, ErrDirectEgressRefused
+		}
+		return p, nil
 	}
 	p, err := For(req.URL)
-	if p != nil && onLAN(req.URL.Hostname()) {
+	if err != nil {
+		return nil, err
+	}
+	if p != nil && onLAN(host) {
 		return nil, nil
 	}
-	return p, err
+	if p == nil && RequireProxy() && !onLAN(host) {
+		return nil, ErrDirectEgressRefused
+	}
+	return p, nil
 }
 
 type choiceKey struct{}
@@ -442,6 +456,9 @@ func EnvWith(choice string, env []string) []string {
 	}
 	switch s {
 	case "direct":
+		if RequireProxy() {
+			return withProxy(env, DeadProxy, nil)
+		}
 		return withProxy(env, "", nil)
 	case "":
 		for _, e := range env {
@@ -454,17 +471,23 @@ func EnvWith(choice string, env []string) []string {
 		p, bypass = sys.URL, sys.Bypass
 		if p == "" {
 			if p, bypass = shellProxy(); p == "" {
+				if RequireProxy() {
+					return withProxy(env, DeadProxy, nil)
+				}
 				return env
 			}
 		}
 	default:
 		u, err := Parse(s)
 		if err != nil {
+			if RequireProxy() {
+				return withProxy(env, DeadProxy, nil)
+			}
 			return env
 		}
 		p = u.String()
 	}
-	return withProxy(env, p, bypass)
+	return withProxy(env, normalizeExportProxy(p), bypass)
 }
 
 func proxyVar(k string) bool {

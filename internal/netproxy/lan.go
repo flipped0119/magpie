@@ -104,7 +104,7 @@ var lanDial = 5 * time.Second
 func lanDialCap(t *http.Transport) {
 	dial := t.DialContext
 	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
+		dial = (&net.Dialer{KeepAlive: deadPeerKeepAlive, Control: deadPeerControl}).DialContext
 	}
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if h, _, err := net.SplitHostPort(addr); err == nil {

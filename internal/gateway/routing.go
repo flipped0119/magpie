@@ -1830,6 +1830,13 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			return r
 		}
 		if overloaded {
+			// For Claude/Anthropic, an unhinted 529 overloaded_error reflects
+			// platform-wide congestion rather than an account fault; resting
+			// the account would churn warm session bindings across the pool.
+			if (c.p.ID == "claude" || c.p.ID == "anthropic") && retryAfter(header, now) == 0 {
+				r.By, r.Until = "platform-overload", now
+				return r
+			}
 			// the vendor's servers too busy for anyone (celestial_eagle_99230
 			// on Discord: ChatGPT's 529 server_is_overloaded on gpt-6-sol
 			// rested eight Plus accounts each up to the 10-minute cap,

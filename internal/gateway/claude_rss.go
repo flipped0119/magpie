@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -49,8 +50,9 @@ func claudeRunBudget() (int64, string) {
 			runBudget.n, runBudget.why = claudeRunUnknown, "memory not known"
 			return
 		}
-		runBudget.n = max(limit/8, claudeRunFloor)
-		runBudget.why = fmt.Sprintf("an eighth of %d MiB (%s), %d MiB at least", limit>>20, why, claudeRunFloor>>20)
+		floor := lowmem.ClaudeRunRSSFloor(claudeRunFloor)
+		runBudget.n = max(limit/8, floor)
+		runBudget.why = fmt.Sprintf("an eighth of %d MiB (%s), %d MiB at least", limit>>20, why, floor>>20)
 	})
 	return runBudget.n, runBudget.why
 }

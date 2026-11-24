@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -92,7 +93,7 @@ func sweepPriced(now time.Time, every bool) {
 		if e.refs != 0 {
 			continue
 		}
-		if wait := pricedLinger - now.Sub(e.idle); !every && wait > 0 {
+		if wait := lowmem.BlockPriceLinger(pricedLinger) - now.Sub(e.idle); !every && wait > 0 {
 			left = max(left, wait)
 			continue
 		}

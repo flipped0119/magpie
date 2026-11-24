@@ -966,6 +966,23 @@ func readAllowances(agent string) map[string]Allowance {
 				}
 			}
 			c.Lock()
+			prevAll := c.m[agent]
+			// Preserve last-known Allowance for any account whose probe failed with
+			// a non-denial error so a transient hiccup never drops it from c.m[agent]
+			// (which would silently lift usage caps or promote it via learns()).
+			for user, q := range readings {
+				if q.Error == "" {
+					continue
+				}
+				if agent == "claude" && claudeDenied(q.Error) {
+					continue
+				}
+				if _, exists := all[user]; !exists {
+					if prev, ok := prevAll[user]; ok {
+						all[user] = prev
+					}
+				}
+			}
 			now := time.Now()
 			// as old as its oldest reading: one the Usage page made 50s
 			// ago, taken here, is read again in 10s, not kept a minute

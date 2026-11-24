@@ -163,6 +163,9 @@ type stick struct {
 	// on after one that had: a stand-in, given back at a new turn once a
 	// member ahead is ready (backFromStandIn). Kept on disk too
 	stoodIn bool
+	// detourStart records when a warm stick began detouring onto another
+	// account due to brief cooling or lane saturation (affinity_hold.go).
+	detourStart time.Time
 }
 
 // hourCache is the part of a conversation's prompt the vendor said it keeps
@@ -833,10 +836,10 @@ func affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http
 		// Within a turn it stays; Stays: Session and Strict, the user's
 		// own, keep it where it is
 		a.Why = "hours"
-	case at > 0 && pl.order[at].Known && pl.order[at].Used >= provider.SpentShareOf(cs[at].p.Routing) && !pl.order[at].CreditsFirst:
-		// all but used up, and put behind another: first still — the
-		// one key or account it has (#1016), or every one used up — it
-		// doesn't move
+	case at > 0 && spentEvictable(pl.order[at], pl.order[0], provider.SpentShareOf(cs[at].p.Routing)):
+		// all but used up, and put behind a meaningfully healthier peer:
+		// first still — the one key or account it has (#1016), or every one
+		// used up within 20 points — it doesn't move
 		a.Why = "spent"
 	case mode == provider.AffinitySession:
 		a.Why = "session"
@@ -1270,6 +1273,14 @@ func answered(key string, c candidate, turn int, u Usage) {
 // answeredStanding is answered, with whether c stood in for a member
 // listed ahead of its own (standsInFor).
 func answeredStanding(key string, c candidate, turn int, u Usage, stoodIn bool) {
+	answeredWithDetour(key, c, turn, u, stoodIn, false, nil, nil)
+}
+
+// answeredWithDetour is answeredStanding with detour-hold awareness: when a
+// warm home account is only briefly resting or saturated in laneMate, keep
+// the home stick intact (recording detourStart) so subsequent turns return to
+// the warm prompt cache instead of permanently migrating after a hiccup.
+func answeredWithDetour(key string, c candidate, turn int, u Usage, stoodIn bool, homeKept bool, plannedCs []candidate, plannedOrder []Weighed) {
 	cacheRead, cacheWrite := u.CacheRead, u.CacheWrite
 	if cacheRead == 0 && cacheWrite == 0 {
 		cacheWrite = u.Input
@@ -1277,12 +1288,24 @@ func answeredStanding(key string, c candidate, turn int, u Usage, stoodIn bool) 
 	now := time.Now()
 	sticks.Lock()
 	var hour hourCache
-	if st, ok := sticks.m[key]; ok && st.who == c.who() && st.model == c.model {
-		hour = st.hour // a cache is the account's, of the model
-		// a stand-in that answers the conversation on is a stand-in
-		// still: the member it stood in for, back and put behind it
-		// meanwhile by routing, is given it once routing puts it first
-		stoodIn = stoodIn || st.stoodIn
+	if st, ok := sticks.m[key]; ok {
+		if st.who == c.who() && st.model == c.model {
+			hour = st.hour // a cache is the account's, of the model
+			// a stand-in that answers the conversation on is a stand-in
+			// still: the member it stood in for, back and put behind it
+			// meanwhile by routing, is given it once routing puts it first
+			stoodIn = stoodIn || st.stoodIn
+		} else if len(plannedCs) > 0 && len(plannedOrder) > 0 {
+			if hold, start := shouldHoldHomeStick(st, c, homeKept, plannedCs, plannedOrder, now); hold {
+				st.detourStart = start
+				st.turn = max(st.turn, turn)
+				sticks.m[key] = st
+				delete(sticks.opening, key)
+				sticks.Unlock()
+				noteSticks()
+				return
+			}
+		}
 	}
 	hour = hour.after(u, now)
 	sticks.m[key] = stick{rest: c.rest, who: c.who(), model: c.model, effort: c.effort, turn: turn, at: now, cacheRead: cacheRead, cacheWrite: cacheWrite, hour: hour, stoodIn: stoodIn}
