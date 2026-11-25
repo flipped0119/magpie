@@ -6096,7 +6096,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a compaction a rule sent to a model of its own leaves the
 			// conversation, and the turn's size, where they were
 			if hit == nil || !hit.Compact {
-				answeredWithDetour(stuck, c, aff.Turn, call.Usage, standsInFor(c, plannedCs, plannedOrder), aff.Kept, plannedCs, plannedOrder)
+				answeredWithDetour(stuck, c, aff.Turn, call.Usage, standsInFor(c, plannedCs, plannedOrder), gaveWay, plannedCs, plannedOrder)
 				// what it answered, it holds: whatever it refused as too
 				// long on the way is forgotten (#3453)
 				forgetOverflow(stuck, c)
@@ -7028,6 +7028,10 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		// sent plain, ChatGPT answered a 1.1 MB one 503 (ylorn on X)
 		sent = provider.CodexCompressed(req, body)
 	}
+	var anthGzip *anthropicGzipAttempt
+	if to == provider.Anthropic && dict == nil {
+		anthGzip, sent = maybeCompressAnthropicRequest(p, req, body)
+	}
 	// the bytes go on the wire whether the vendor answers or not, counted
 	// for the request's ledger row (#4456)
 	sentUp(ctx, sent, len(body))
@@ -7048,6 +7052,9 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	if dict != nil {
 		// a body the other magpie couldn't decode goes again whole
 		res, err = dict.after(req, res, err, again)
+	}
+	if anthGzip != nil {
+		res, err = anthGzip.after(req, res, err, again)
 	}
 	if err == nil && res.StatusCode >= 400 && provider.OpenCodeURL(req.URL.String()) {
 		logOpenCodeRefusal(p, req, res.StatusCode)

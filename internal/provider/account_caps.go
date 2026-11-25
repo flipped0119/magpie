@@ -190,6 +190,23 @@ func (c WindowCaps) limitShare(name string, of float64, aside bool) (share float
 	return c.limitShareAt(name, of, aside, time.Time{})
 }
 
+// EffectiveProtectPercent returns the active protection stop line in (0, 100)
+// rounded to two decimals for window name, using the exact same precedence as
+// routing (explicit window amount/share cap, account-wide cap, or RandomGate).
+// Returns nil when no cap below 100% applies (or the window is explicitly
+// exempted at 100%).
+func (c WindowCaps) EffectiveProtectPercent(name string, of float64, aside bool, resets time.Time) *float64 {
+	share, _, _ := c.limitShareAt(name, of, aside, resets)
+	if share <= 0 || share >= 100 || math.IsNaN(share) || math.IsInf(share, 0) {
+		return nil
+	}
+	v := math.Round(share*100) / 100
+	if v <= 0 || v >= 100 {
+		return nil
+	}
+	return &v
+}
+
 // past says whether a window at used percent, count of its unit, is at or
 // past the cap limitShare gave: by its count when the cap is an amount.
 func past(share, amount, used, count float64) bool {

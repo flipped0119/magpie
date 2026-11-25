@@ -23,7 +23,8 @@ import (
 // this nor keySlotRoutes fails TestKeySlotEveryRoute, so a new one is
 // judged.
 var keySlotFree = []string{
-	"POST /api/show", "POST /v1/magpie/usage/requests", "POST " + provider.RemoteRefreshPath,
+	"POST /api/show", "POST /api/event_logging", "POST /api/event_logging/batch", "POST /api/event_logging/v2/batch",
+	"POST /v1/magpie/usage/requests", "POST " + provider.RemoteRefreshPath,
 	"POST " + provider.RemoteCodexResetPath, "POST " + StatuslinePath, "POST " + KeysPath,
 	"DELETE " + KeysPath + "/{id}", "POST " + OIDCKeysPath, "POST " + provider.RemoteProvePath,
 	"POST " + RestartPath, "POST " + provider.RemoteUpdatePath, "POST /v1/messages/count_tokens",

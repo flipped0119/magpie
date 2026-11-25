@@ -65,6 +65,41 @@ func TestRandomQuotaGateDeterministicAndRespectsUserCaps(t *testing.T) {
 	}
 }
 
+func TestEffectiveProtectPercent(t *testing.T) {
+	reset := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	t.Setenv("MAGPIE_CLAUDE_RANDOM_GATE", "93-97")
+
+	// Random gate active on claude without explicit cap.
+	caps := (Provider{ID: "claude"}).CapsOf("alice@example.com")
+	got := caps.EffectiveProtectPercent("Weekly", 0, false, reset)
+	if got == nil || *got < 93 || *got > 97 {
+		t.Fatalf("expected protect_percent in [93,97], got %v", got)
+	}
+
+	// Explicit user cap overrides random gate.
+	capsUser := (Provider{ID: "claude", AccountCaps: map[string]int{"alice@example.com": 80}}).CapsOf("alice@example.com")
+	if got := capsUser.EffectiveProtectPercent("Weekly", 0, false, reset); got == nil || *got != 80 {
+		t.Fatalf("expected protect_percent=80, got %v", got)
+	}
+
+	// Explicit 100% exemption omits protect_percent.
+	capsExempt := (Provider{ID: "claude", AccountWindowCaps: map[string]map[string]int{"alice@example.com": {"weekly": 100}}}).CapsOf("alice@example.com")
+	if got := capsExempt.EffectiveProtectPercent("Weekly", 0, false, reset); got != nil {
+		t.Fatalf("expected nil protect_percent when exempted at 100%%, got %v", *got)
+	}
+
+	// Amount cap converts to percentage rounded to 2 decimals.
+	capsAmt := WindowCaps{Amounts: map[string]float64{"weekly": 100}}
+	if got := capsAmt.EffectiveProtectPercent("Weekly", 300, false, reset); got == nil || *got != 33.33 {
+		t.Fatalf("expected protect_percent=33.33, got %v", got)
+	}
+
+	// No cap and no random gate omits protect_percent.
+	if got := (WindowCaps{}).EffectiveProtectPercent("Weekly", 0, false, reset); got != nil {
+		t.Fatalf("expected nil protect_percent with no cap, got %v", *got)
+	}
+}
+
 func TestClaudeFailedReadKeepsLastKnownQuota(t *testing.T) {
 	// Verify that loginUsageEntry fallback logic preserves last good Claude reading
 	// on non-denial errors while still surfacing claudeDenied errors.

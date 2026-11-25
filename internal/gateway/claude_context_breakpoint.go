@@ -388,18 +388,32 @@ func anthropicCacheControlClean(body []byte) bool {
 	return clean
 }
 
-// anonymizeThirdPartyUserID replaces metadata.user_id with a deterministic
-// opaque SHA-256 digest (in-place byte splice) when forwarding Claude Code
-// Anthropic traffic to non-Claude third-party vendors (DeepSeek, Kimi, etc.),
+// isClaudeCodeUserID reports whether metadata.user_id carries Claude Code's
+// Anthropic identity fields (legacy `user_<id>_account_<uuid>_session_<uuid>`
+// or JSON `{"device_id":...,"account_uuid":...,"session_id":...}`). Plain
+// caller-supplied IDs (e.g. "u1") are preserved verbatim.
+func isClaudeCodeUserID(v string) bool {
+	if strings.Contains(v, "_account_") || strings.Contains(v, "_session_") {
+		return true
+	}
+	if strings.HasPrefix(v, "{") && (strings.Contains(v, `"account_uuid"`) || strings.Contains(v, `"device_id"`)) {
+		return true
+	}
+	return false
+}
+
+// anonymizeThirdPartyUserID replaces Claude Code's Anthropic metadata.user_id
+// with a deterministic opaque SHA-256 digest (in-place byte splice) when
+// forwarding traffic to non-Claude third-party vendors (DeepSeek, Kimi, etc.),
 // preventing Anthropic device_id/account_uuid leakage while preserving stable
-// per-caller KV-cache isolation.
+// per-caller KV-cache isolation and keeping ordinary caller user_ids verbatim.
 func anonymizeThirdPartyUserID(body []byte) []byte {
 	uid := gjson.GetBytes(body, "metadata.user_id")
 	if !uid.Exists() || uid.Type != gjson.String || uid.Index <= 0 || uid.Index+len(uid.Raw) > len(body) {
 		return body
 	}
 	rawVal := uid.String()
-	if rawVal == "" || strings.HasPrefix(rawVal, "magpie_u_") {
+	if rawVal == "" || strings.HasPrefix(rawVal, "magpie_u_") || !isClaudeCodeUserID(rawVal) {
 		return body
 	}
 	sum := sha256.Sum256([]byte("magpie-third-party-uid\x00" + rawVal))

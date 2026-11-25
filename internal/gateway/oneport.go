@@ -38,6 +38,8 @@ var clientPrefixes = []string{
 	// and magpie's CA (CAPath), which the other computer fetches from the
 	// address it gives its agents
 	CAPath,
+	// Claude Code CLI managed settings compatibility endpoint
+	ManagedSettingsPath,
 }
 
 // ClientPath: p is one of the gateway's client routes, which `magpie web`

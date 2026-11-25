@@ -58,13 +58,13 @@ func spentEvictable(bound, best Weighed, spentShare float64) bool {
 // leave an existing warm home stick `st` intact (recording detourStart) instead
 // of permanently migrating the session onto `c`.
 //
-// It triggers ONLY on involuntary detours — either the home account was
-// skipped due to a brief transient rest (`homeWeighed.Rest != nil`), or the
-// request planned to keep the home account (`homeKept == true`) and fell back
-// during execution (e.g. laneMate concurrency saturation or transient error).
-// Intentional rotations (routing=rotate, affinity=turn/off, rule changes) never
-// hold the old stick.
-func shouldHoldHomeStick(st stick, c candidate, homeKept bool, plannedCs []candidate, plannedOrder []Weighed, now time.Time) (bool, time.Time) {
+// It triggers ONLY on involuntary non-failing detours — either the home account
+// was skipped due to a brief transient rest (`homeWeighed.Rest != nil`), or it
+// gave way before execution because its concurrency lane was full
+// (`gaveWay[st.who]`). Active request failures on the home account (e.g. a 500
+// that fails over within a group/rule) and intentional rotations never hold the
+// old stick.
+func shouldHoldHomeStick(st stick, c candidate, gaveWay map[string]bool, plannedCs []candidate, plannedOrder []Weighed, now time.Time) (bool, time.Time) {
 	if !detourHoldEnabled() || st.who == "" || st.who == c.who() {
 		return false, time.Time{}
 	}
@@ -82,9 +82,9 @@ func shouldHoldHomeStick(st stick, c candidate, homeKept bool, plannedCs []candi
 	homeCand := plannedCs[homeIdx]
 	homeWeighed := plannedOrder[homeIdx]
 
-	// Require an involuntary detour: either brief rest on home, or affinity
-	// explicitly kept home and execution detoured (e.g. lane saturation / transient 5xx).
-	if homeWeighed.Rest == nil && !homeKept {
+	// Require an involuntary detour: either brief rest on home, or home gave way
+	// due to concurrency lane saturation before a request failed on it.
+	if homeWeighed.Rest == nil && !gaveWay[st.who] {
 		return false, time.Time{}
 	}
 

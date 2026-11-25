@@ -4068,6 +4068,7 @@ application:
     - /deepseek-chat
     - /join
     - /magpie-ca.crt
+    - /managed/settings
 services:
   magpie:
     image: ghcr.io/yetone/magpie:0.1.N

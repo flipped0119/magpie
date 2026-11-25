@@ -44,12 +44,13 @@ type meUsageAccount struct {
 }
 
 type meUsageWindow struct {
-	Kind        string  `json:"kind"`
-	Scope       string  `json:"scope,omitempty"`
-	ScopedModel string  `json:"scoped_model,omitempty"`
-	UsedRatio   float64 `json:"used_ratio"`
-	ResetsAt    string  `json:"resets_at,omitempty"`
-	CheckedAt   string  `json:"checked_at,omitempty"`
+	Kind           string   `json:"kind"`
+	Scope          string   `json:"scope,omitempty"`
+	ScopedModel    string   `json:"scoped_model,omitempty"`
+	UsedRatio      float64  `json:"used_ratio"`
+	ProtectPercent *float64 `json:"protect_percent,omitempty"`
+	ResetsAt       string   `json:"resets_at,omitempty"`
+	CheckedAt      string   `json:"checked_at,omitempty"`
 }
 
 func (s *Server) meUsage(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +130,7 @@ func buildMeUsageResponse(keyName string, qs []provider.Quota, curProvider, curA
 			checkedAt = q.AsOf.UTC().Format(time.RFC3339)
 		}
 
+		caps := provider.AccountCapsOf(q.Provider, q.User)
 		wins := make([]meUsageWindow, 0, len(q.Windows))
 		allExhausted := false
 		var earliestReset time.Time
@@ -147,7 +149,9 @@ func buildMeUsageResponse(keyName string, qs []provider.Quota, curProvider, curA
 				ratio = 1
 			}
 			var rstStr string
+			var resets time.Time
 			if sp.ResetsAt != nil && !sp.ResetsAt.IsZero() {
+				resets = *sp.ResetsAt
 				rstStr = sp.ResetsAt.UTC().Format(time.RFC3339)
 				if ratio >= 0.995 && sp.ResetsAt.After(now) {
 					allExhausted = true
@@ -156,13 +160,18 @@ func buildMeUsageResponse(keyName string, qs []provider.Quota, curProvider, curA
 					}
 				}
 			}
+			var protectPct *float64
+			if scopeKind == "account" && sp.Lane == "" {
+				protectPct = caps.EffectiveProtectPercent(sp.Name, sp.Limit, false, resets)
+			}
 			wins = append(wins, meUsageWindow{
-				Kind:        kind,
-				Scope:       scopeKind,
-				ScopedModel: scopedModel,
-				UsedRatio:   ratio,
-				ResetsAt:    rstStr,
-				CheckedAt:   checkedAt,
+				Kind:           kind,
+				Scope:          scopeKind,
+				ScopedModel:    scopedModel,
+				UsedRatio:      ratio,
+				ProtectPercent: protectPct,
+				ResetsAt:       rstStr,
+				CheckedAt:      checkedAt,
 			})
 		}
 

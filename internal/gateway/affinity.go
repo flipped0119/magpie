@@ -1273,14 +1273,14 @@ func answered(key string, c candidate, turn int, u Usage) {
 // answeredStanding is answered, with whether c stood in for a member
 // listed ahead of its own (standsInFor).
 func answeredStanding(key string, c candidate, turn int, u Usage, stoodIn bool) {
-	answeredWithDetour(key, c, turn, u, stoodIn, false, nil, nil)
+	answeredWithDetour(key, c, turn, u, stoodIn, nil, nil, nil)
 }
 
 // answeredWithDetour is answeredStanding with detour-hold awareness: when a
 // warm home account is only briefly resting or saturated in laneMate, keep
 // the home stick intact (recording detourStart) so subsequent turns return to
 // the warm prompt cache instead of permanently migrating after a hiccup.
-func answeredWithDetour(key string, c candidate, turn int, u Usage, stoodIn bool, homeKept bool, plannedCs []candidate, plannedOrder []Weighed) {
+func answeredWithDetour(key string, c candidate, turn int, u Usage, stoodIn bool, gaveWay map[string]bool, plannedCs []candidate, plannedOrder []Weighed) {
 	cacheRead, cacheWrite := u.CacheRead, u.CacheWrite
 	if cacheRead == 0 && cacheWrite == 0 {
 		cacheWrite = u.Input
@@ -1296,7 +1296,7 @@ func answeredWithDetour(key string, c candidate, turn int, u Usage, stoodIn bool
 			// meanwhile by routing, is given it once routing puts it first
 			stoodIn = stoodIn || st.stoodIn
 		} else if len(plannedCs) > 0 && len(plannedOrder) > 0 {
-			if hold, start := shouldHoldHomeStick(st, c, homeKept, plannedCs, plannedOrder, now); hold {
+			if hold, start := shouldHoldHomeStick(st, c, gaveWay, plannedCs, plannedOrder, now); hold {
 				st.detourStart = start
 				st.turn = max(st.turn, turn)
 				sticks.m[key] = st

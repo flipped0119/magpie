@@ -966,20 +966,20 @@ func readAllowances(agent string) map[string]Allowance {
 				}
 			}
 			c.Lock()
-			prevAll := c.m[agent]
-			// Preserve last-known Allowance for any account whose probe failed with
-			// a non-denial error so a transient hiccup never drops it from c.m[agent]
-			// (which would silently lift usage caps or promote it via learns()).
-			for user, q := range readings {
-				if q.Error == "" {
-					continue
-				}
-				if agent == "claude" && claudeDenied(q.Error) {
-					continue
-				}
-				if _, exists := all[user]; !exists {
-					if prev, ok := prevAll[user]; ok {
-						all[user] = prev
+			if agent == "claude" {
+				// Preserve last-known Claude Allowance across non-denial probe failures
+				// so a transient hiccup never drops it from c.m["claude"] (which would
+				// silently lift usage caps or promote it via learns()). Non-Claude
+				// providers keep upstream's NoteCodexLimits / cachedLoginReading contract.
+				prevAll := c.m[agent]
+				for user, q := range readings {
+					if q.Error == "" || claudeDenied(q.Error) {
+						continue
+					}
+					if _, exists := all[user]; !exists {
+						if prev, ok := prevAll[user]; ok {
+							all[user] = prev
+						}
 					}
 				}
 			}

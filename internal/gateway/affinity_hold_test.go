@@ -37,7 +37,7 @@ func TestDetourHoldPreservesWarmHomeStick(t *testing.T) {
 		{Known: true, Used: 40},
 		{Known: true, Used: 45, Rest: &Rest{Why: failOther, Until: time.Now().Add(30 * time.Second)}},
 	}
-	answeredWithDetour(key, detour, 2, Usage{CacheWrite: 50_000}, false, false, plannedCs, plannedOrder)
+	answeredWithDetour(key, detour, 2, Usage{CacheWrite: 50_000}, false, nil, plannedCs, plannedOrder)
 
 	sticks.Lock()
 	st := sticks.m[key]
@@ -49,12 +49,32 @@ func TestDetourHoldPreservesWarmHomeStick(t *testing.T) {
 		t.Fatal("expected detourStart to be recorded")
 	}
 
-	// Quota exhaustion on home MUST migrate immediately (no hold).
+	// Lane saturation (gaveWay[home.who()]) with no rest also holds home stick.
+	laneOrder := []Weighed{{Known: true, Used: 40}, {Known: true, Used: 45}}
+	answeredWithDetour(key, detour, 2, Usage{CacheWrite: 50_000}, false, map[string]bool{home.who(): true}, plannedCs, laneOrder)
+	sticks.Lock()
+	stLane := sticks.m[key]
+	sticks.Unlock()
+	if stLane.who != home.who() {
+		t.Fatalf("lane saturation detour should preserve home stick %q, got %q", home.who(), stLane.who)
+	}
+
+	// Active request failure failover (no prior rest, no gaveWay) MUST migrate to detour.
+	answeredWithDetour(key, detour, 2, Usage{CacheWrite: 50_000}, false, nil, plannedCs, laneOrder)
+	sticks.Lock()
+	stFail := sticks.m[key]
+	sticks.Unlock()
+	if stFail.who != detour.who() {
+		t.Fatalf("active request failover should migrate to %q, got %q", detour.who(), stFail.who)
+	}
+
+	// Re-establish home stick, then test quota exhaustion MUST migrate immediately (no hold).
+	answeredStanding(key, home, 3, Usage{CacheRead: 50_000, CacheWrite1h: 10_000}, false)
 	quotaOrder := []Weighed{
 		{Known: true, Used: 40},
 		{Known: true, Used: 100, Rest: &Rest{Why: failQuota, Until: time.Now().Add(2 * time.Hour)}},
 	}
-	answeredWithDetour(key, detour, 3, Usage{CacheWrite: 50_000}, false, false, plannedCs, quotaOrder)
+	answeredWithDetour(key, detour, 4, Usage{CacheWrite: 50_000}, false, nil, plannedCs, quotaOrder)
 	sticks.Lock()
 	stAfter := sticks.m[key]
 	sticks.Unlock()

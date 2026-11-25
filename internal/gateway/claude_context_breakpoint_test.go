@@ -91,6 +91,20 @@ func TestAnonymizeThirdPartyUserID(t *testing.T) {
 	if got2 := anonymizeThirdPartyUserID(got); !bytes.Equal(got2, got) {
 		t.Fatalf("anonymizeThirdPartyUserID should be idempotent")
 	}
+
+	// Modern Claude Code JSON user_id with device_id/account_uuid is anonymized too.
+	modern := []byte(`{"model":"deepseek-chat","metadata":{"user_id":"{\"device_id\":\"dev1\",\"account_uuid\":\"acct1\",\"session_id\":\"s1\"}"},"messages":[]}`)
+	gotModern := anonymizeThirdPartyUserID(modern)
+	uidModern := gjson.GetBytes(gotModern, "metadata.user_id").String()
+	if !strings.HasPrefix(uidModern, "magpie_u_") || strings.Contains(uidModern, "acct1") {
+		t.Fatalf("expected modern Claude Code user_id anonymized, got %q", uidModern)
+	}
+
+	// Plain caller-supplied user_id stays verbatim.
+	plain := []byte(`{"model":"m1","metadata":{"user_id":"u1"},"messages":[]}`)
+	if gotPlain := anonymizeThirdPartyUserID(plain); !bytes.Equal(gotPlain, plain) {
+		t.Fatalf("plain caller user_id should stay verbatim, got %s", gotPlain)
+	}
 }
 
 func TestHourMarksRefusalDetectsExtendedBeta(t *testing.T) {

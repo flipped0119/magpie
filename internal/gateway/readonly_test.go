@@ -27,6 +27,7 @@ var readOnlyRefused = []string{
 	"GET /v1/models", "GET /models", "GET /v1/models/{id...}", "GET /muse-code/models",
 	"GET /api/hello", "GET /api/version", "GET /api/tags",
 	"POST /api/show", "POST /api/chat", "POST /api/generate",
+	"POST /api/event_logging", "POST /api/event_logging/batch", "POST /api/event_logging/v2/batch",
 	// writes, another key's routes, the whole trace, debugging
 	"POST /v1/magpie/usage/requests", "POST " + provider.RemoteRefreshPath,
 	// the chat page's models, its chat, files and speech

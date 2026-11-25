@@ -57,6 +57,67 @@ func TestBuildMeUsageResponseCompatibleWithAsterGateMods(t *testing.T) {
 	}
 }
 
+func TestBuildMeUsageResponseProtectPercent(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_CLAUDE_RANDOM_GATE", "93-97")
+
+	now := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	rst5h := now.Add(3 * time.Hour)
+	rst7d := now.Add(72 * time.Hour)
+
+	qs := []provider.Quota{
+		{
+			Provider: "claude",
+			User:     "alice@example.com",
+			Plan:     "default_claude_max_20x",
+			Windows: []provider.QuotaSpan{
+				{Name: "5 hours", Used: 25, Remaining: 75, ResetsAt: &rst5h},
+				{Name: "Weekly", Used: 60, Remaining: 40, ResetsAt: &rst7d},
+				{Name: "7 days · Opus", Used: 10, Remaining: 90, ResetsAt: &rst7d},
+			},
+		},
+	}
+
+	resp := buildMeUsageResponse("my-key", qs, "claude", "alice@example.com", now)
+	if len(resp.Accounts) != 1 || len(resp.Accounts[0].Windows) != 3 {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	w5h := resp.Accounts[0].Windows[0]
+	w7d := resp.Accounts[0].Windows[1]
+	wOpus := resp.Accounts[0].Windows[2]
+
+	if w5h.ProtectPercent == nil || *w5h.ProtectPercent < 93 || *w5h.ProtectPercent > 97 {
+		t.Fatalf("expected 5h account window protect_percent in [93,97], got %v", w5h.ProtectPercent)
+	}
+	if w7d.ProtectPercent == nil || *w7d.ProtectPercent < 93 || *w7d.ProtectPercent > 97 {
+		t.Fatalf("expected weekly account window protect_percent in [93,97], got %v", w7d.ProtectPercent)
+	}
+	// Model-scoped windows must omit protect_percent per AsterGate #3668.
+	if wOpus.ProtectPercent != nil {
+		t.Fatalf("expected model-scoped window to omit protect_percent, got %v", *wOpus.ProtectPercent)
+	}
+
+	// Verify JSON omits protect_percent on model-scoped window and includes it on account windows.
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Accounts []struct {
+			Windows []map[string]any `json:"windows"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded.Accounts[0].Windows[0]["protect_percent"]; !ok {
+		t.Fatalf("expected protect_percent in JSON for five_hour: %s", string(b))
+	}
+	if _, ok := decoded.Accounts[0].Windows[2]["protect_percent"]; ok {
+		t.Fatalf("expected protect_percent omitted in JSON for model-scoped window: %s", string(b))
+	}
+}
+
 func TestManagedSettingsAndEventLogging(t *testing.T) {
 	s := New()
 	h := s.Handler()
