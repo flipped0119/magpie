@@ -322,36 +322,62 @@ func TestClaudeReplacementAfterCancel(t *testing.T) {
 					h.s.subscription.abortAll()
 					h.s = New()
 				}
-				before := h.toldBy()
-				reply := h.ask("[" + history + "," + rmsg("user", "replacement BETA") + "]")
-				if !restart && mode == "print" {
-					if pidOf(t, reply) != pidOf(t, first) {
-						t.Fatalf("rewound run was replaced: %q -> %q", first, reply)
-					}
-					return
-				}
-				for pid, run := range h.toldBy() {
-					if _, old := before[pid]; old {
-						continue
-					}
-					if !strings.Contains(run, "--resume ") || !strings.Contains(run, "replacement BETA") || strings.Contains(run, "ALPHA") {
-						t.Fatalf("replacement did not resume with its new turn alone: %s", run)
-					}
-					sid := strings.Fields(strings.SplitN(run, "--resume ", 2)[1])[0]
-					files, _ := filepath.Glob(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "*", sid+".jsonl"))
-					if len(files) != 1 {
-						t.Fatalf("resumed transcript %s missing", sid)
-					}
-					data, err := os.ReadFile(files[0])
-					if err != nil || strings.Contains(string(data), "cancelled") || strings.Count(string(data), "line-1") != 2 {
-						t.Fatalf("resumed transcript did not retain just the completed turn before the replacement: %s (%v)", data, err)
-					}
-					return
-				}
-				t.Fatal("no run resumed the saved transcript")
+				h.replaceAfterCancel(t, mode, restart, first, history)
 			})
 		}
 	}
+}
+
+// A client that rewrites its history (#912), here one that takes the end
+// off the reply it was given, asks again after the cancel under another
+// key: the session cut before the cancelled turn is still found
+// (rewritten), not told whole to a new Claude Code.
+func TestClaudeRewrittenReplacementAfterCancel(t *testing.T) {
+	// the interactive mode only: a print run is rewound in place, not shelved
+	for _, mode := range []string{"interactive"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newBusyRetryHarness(t, mode)
+			t.Cleanup(func() { h.s.subscription.abortAll() })
+			history := rmsg("user", "previous conversation ALPHA")
+			first := h.ask("[" + history + "]")
+			sent := history + "," + rmsg("assistant", first)
+			h.giveUp("[" + sent + "," + rmsg("user", "SLOW cancelled") + "]")
+			h.replaceAfterCancel(t, mode, false, first, history+","+rmsg("assistant", first[:len(first)-2]))
+		})
+	}
+}
+
+// replaceAfterCancel asks the replacement turn after history as the client
+// sends it back (again), and checks it went on from the cut session.
+func (h *busyRetryHarness) replaceAfterCancel(t *testing.T, mode string, restart bool, first, again string) {
+	t.Helper()
+	before := h.toldBy()
+	reply := h.ask("[" + again + "," + rmsg("user", "replacement BETA") + "]")
+	if !restart && mode == "print" {
+		if pidOf(t, reply) != pidOf(t, first) {
+			t.Fatalf("rewound run was replaced: %q -> %q", first, reply)
+		}
+		return
+	}
+	for pid, run := range h.toldBy() {
+		if _, old := before[pid]; old {
+			continue
+		}
+		if !strings.Contains(run, "--resume ") || !strings.Contains(run, "replacement BETA") || strings.Contains(run, "ALPHA") {
+			t.Fatalf("replacement did not resume with its new turn alone: %s", run)
+		}
+		sid := strings.Fields(strings.SplitN(run, "--resume ", 2)[1])[0]
+		files, _ := filepath.Glob(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "*", sid+".jsonl"))
+		if len(files) != 1 {
+			t.Fatalf("resumed transcript %s missing", sid)
+		}
+		data, err := os.ReadFile(files[0])
+		if err != nil || strings.Contains(string(data), "cancelled") || strings.Count(string(data), "line-1") != 2 {
+			t.Fatalf("resumed transcript did not retain just the completed turn before the replacement: %s (%v)", data, err)
+		}
+		return
+	}
+	t.Fatal("no run resumed the saved transcript")
 }
 
 // checkingCancel signals when a replacement or shutdown actually observes

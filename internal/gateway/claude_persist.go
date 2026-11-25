@@ -381,12 +381,19 @@ func (b *subscriptionBridge) keepBeforeTurn(run *subscriptionRun, req *Request, 
 	// (#3808)
 	key, since := turnFrom(req, owner, took)
 	conv := ""
-	if keys := conversationKeys(owner, req.Messages[:len(req.Messages)-len(since)]); len(keys) > 0 {
+	before := req.Messages[:len(req.Messages)-len(since)]
+	if keys := conversationKeys(owner, before); len(keys) > 0 {
 		conv = keys[len(keys)-1]
+	}
+	// a client that rewrites its history (#912) asks again under another
+	// key: the conversation before the turn is how rewritten() finds it
+	var loose *looseTurn
+	if n := len(before); n > 0 && before[n-1].Role == "assistant" {
+		loose = newLooseTurn(owner, req, before, true)
 	}
 	now := time.Now()
 	s := &savedSession{session: cut, sessions: sessions, owner: owner, conv: conv, key: key, tools: tools,
-		at: now, tui: tui, appended: appended, cachePrefix: prefix}
+		at: now, tui: tui, appended: appended, cachePrefix: prefix, loose: loose}
 	if cancelledKey == "" {
 		s.until = onWall(now.Add(quotaShelfFor(owner, msg, now)))
 	}
