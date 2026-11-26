@@ -402,6 +402,13 @@ func isClaudeCodeUserID(v string) bool {
 	return false
 }
 
+// anonymizeVendorUID is MAGPIE_ANONYMIZE_VENDOR_UID=1: off by default, since
+// relays (New-API, another magpie) keep a conversation's affinity by the
+// user_id Claude Code sent.
+func anonymizeVendorUID() bool {
+	return strings.TrimSpace(os.Getenv("MAGPIE_ANONYMIZE_VENDOR_UID")) == "1"
+}
+
 // anonymizeThirdPartyUserID replaces Claude Code's Anthropic metadata.user_id
 // with a deterministic opaque SHA-256 digest (in-place byte splice) when
 // forwarding traffic to non-Claude third-party vendors (DeepSeek, Kimi, etc.),

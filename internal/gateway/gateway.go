@@ -7448,9 +7448,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			// vendor's model: its prompt cache missed from the first
 			// byte (#1600, billing_line.go)
 			body = withoutBillingLine(body)
-			// Do not leak Claude Code's raw Anthropic device/account user_id
-			// to third-party vendors while keeping per-caller cache affinity.
-			body = anonymizeThirdPartyUserID(body)
+			// Opt-in only: an Anthropic relay reads metadata.user_id as the
+			// client sent it (TestClaudeCodeHeadersReachAnthropicRelay).
+			if anonymizeVendorUID() {
+				body = anonymizeThirdPartyUserID(body)
+			}
 		}
 		if anthropicModel.MatchString(model) {
 			body = normalizeAnthropicCacheControl(body)
