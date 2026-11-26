@@ -11060,7 +11060,9 @@ func nativeSessionOf(in http.Header) string {
 // it always was; several are hashed as writeOpening reads them, so the
 // cache mark an agent moves on from turn to turn doesn't move the id.
 // affinityID is the conversation a turn's account is kept for: an agent's
-// own session (conversationID), else the caller's X-Magpie-Session, else
+// own session (conversationID), else Claude Code's session in
+// metadata.user_id (a relay drops the headers, claudeCodeSession), else the
+// caller's X-Magpie-Session, else
 // the conversation's hash. Two callers that send the same opening with
 // their own X-Magpie-Session are two conversations (#5242). It is magpie's
 // own key and never goes upstream: conversationID, which a vendor or a
@@ -11070,6 +11072,9 @@ func affinityID(in http.Header, body []byte) string {
 		if v := strings.TrimSpace(in.Get(h)); v != "" {
 			return v
 		}
+	}
+	if v := claudeCodeSession(body); v != "" {
+		return "cc:" + v
 	}
 	if v := strings.TrimSpace(in.Get(SessionHeader)); v != "" {
 		return v

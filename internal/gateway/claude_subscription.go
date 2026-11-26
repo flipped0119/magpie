@@ -7466,6 +7466,9 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 		log.Printf("claude: going on without the previous gateway's saved sessions: %v", err)
 	}
 	owner := p.ID
+	if c := callerScope(r); c != "" {
+		owner += "\x00caller:" + c
+	}
 	if p.Account != nil {
 		owner += "\x00" + p.Account.User
 		if p.Account.AgentsOwn() {
