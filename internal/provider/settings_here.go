@@ -11,10 +11,11 @@ import (
 // on. Sync can keep them to each computer (davsync's
 // Config.ProviderSettingsHere; StudyingPython on X: "只希望同步供应商的key
 // 和列表，不希望同步供应商设置"), while the list and each provider's keys
-// sync. What goes with a key syncs with it: its name, its URLs and API,
-// the header it is sent in, the account behind it (AWS and Vertex,
-// Zhipu's team), a client certificate and the server's pin, and a secret
-// header (SecretHeader) among the headers. A provider new on a computer
+// sync. What goes with a key syncs with it: its name, its URLs and API
+// (a Remote magpie's other addresses among them), the header it is sent
+// in, the account behind it (AWS and Vertex, Zhipu's team), a client
+// certificate and the server's pin, and a secret header (SecretHeader)
+// among the headers. A provider new on a computer
 // comes with the settings it was made with.
 //
 // settingFields names them; TestProviderFieldsSortedForSync fails on a
@@ -27,7 +28,7 @@ var settingFields = []string{
 	// on or off
 	"Off",
 	// routing
-	"Fallback", "Routing", "Sink", "UseFirst", "NoStandIn", "Affinity",
+	"Fallback", "Routing", "Sink", "UseFirst", "NoStandIn", "Affinity", "AgentAccounts",
 	// limits and rests
 	"MaxConcurrency", "MaxAccounts", "AccountConcurrency", "AccountWeights", "QueueLimit", "QueueWait",
 	"MaxRPM", "MaxImages", "QuotaRest", "QuotaResetAt", "RestCap", "LimitRestOff",
@@ -35,6 +36,7 @@ var settingFields = []string{
 	// prices and balances
 	"PriceRate", "CountFree", "Billing", "RateWindows", "KeyOwnBalances", "KeyPriceRates", "TopUpRate",
 	"RateReadHours", "KeyRateFactors", "BalanceURL", "BalancePath", "BalanceMethod", "NoBalanceProbe", "BalanceToken",
+	"KeyBalanceAuth",
 	// requests
 	"Headers", "ExtraBody", "ReplyHeaders", "PassHeaders", "Searches", "CodexAsSent", "ImageFilesOff",
 	"UpstreamProviders", "PromptAsWritten", "AdditionalTools", "AdditionalToolsOff", "PassErrors", "Patience",

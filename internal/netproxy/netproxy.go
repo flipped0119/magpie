@@ -76,34 +76,49 @@ func HTTP2Health() *http.HTTP2Config {
 // context names (With), or else the global one, which a host on the
 // user's own network goes around (onLAN).
 func Func(req *http.Request) (*url.URL, error) {
+	p, _, err := ForRequest(req)
+	return p, err
+}
+
+// ForRequest picks the same proxy as Func and says whether it came from
+// an explicit provider or magpie setting.
+func ForRequest(req *http.Request) (p *url.URL, configured bool, err error) {
 	if err := Held(req.Context()); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	host := req.URL.Hostname()
 	if loopback(host) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if c := choiceOf(req.Context()); c != "" {
 		p, err := forChoice(c)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if p == nil && RequireProxy() && !onLAN(host) {
-			return nil, ErrDirectEgressRefused
+			return nil, false, ErrDirectEgressRefused
 		}
-		return p, nil
+		return p, p != nil, nil
 	}
-	p, err := For(req.URL)
+	c := strings.TrimSpace(settings.Shared().Proxy)
+	p, err = forURL(req.URL, c)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if p != nil && onLAN(host) {
-		return nil, nil
+		return nil, false, nil
 	}
-	if p == nil && RequireProxy() && !onLAN(host) {
-		return nil, ErrDirectEgressRefused
+	if p == nil {
+		if RequireProxy() && !onLAN(host) {
+			return nil, false, ErrDirectEgressRefused
+		}
+		return nil, false, nil
 	}
-	return p, nil
+	if c != "" {
+		return p, true, nil
+	}
+	ep, _ := fromEnv(req.URL)
+	return p, ep != nil, nil
 }
 
 type choiceKey struct{}
@@ -277,6 +292,14 @@ func (d *dispatch) RoundTrip(req *http.Request) (*http.Response, error) {
 			return res, err
 		}
 	}
+	if res, ok, err := failingOver(req, d.send); ok {
+		return res, err
+	}
+	return d.send(req)
+}
+
+// send is RoundTrip at one address.
+func (d *dispatch) send(req *http.Request) (*http.Response, error) {
 	if d.moved() {
 		d.CloseIdleConnections()
 	}
@@ -433,7 +456,11 @@ func (d *dispatch) CloseIdleConnections() {
 
 // For is the proxy a request to u goes through; nil means direct.
 func For(u *url.URL) (*url.URL, error) {
-	switch s := strings.TrimSpace(settings.Shared().Proxy); s {
+	return forURL(u, strings.TrimSpace(settings.Shared().Proxy))
+}
+
+func forURL(u *url.URL, s string) (*url.URL, error) {
+	switch s {
 	case "direct":
 		return nil, nil
 	case "":

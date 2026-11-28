@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -17,7 +19,9 @@ import (
 // ?models=1 adds each one's models: every model it can be asked for, as
 // "<provider>/<model>" takes them, not the first 24 a provider with no
 // picks offers agents (Exposed, manyModels; @tmr11235 again: a plugin
-// testing each model wants the whole list).
+// testing each model wants the whole list). ?models=full gives the same
+// models as /v1/models' rows (modelRows), not ids: their names, levels,
+// windows and prices, which a model past the 24 has nowhere else.
 const AccountsPath = "/v1/magpie/accounts"
 
 // listedAccount is one account or key as AccountsPath tells it.
@@ -34,14 +38,23 @@ type listedAccount struct {
 	Label string `json:"label"`          // the name it is shown by: the user's name for it, its email or login, a key's name or its masked self
 	User  string `json:"user,omitempty"` // a signed-in account's email or login
 	Plan  string `json:"plan,omitempty"`
-	// On says requests may go to it: the provider is on and so is it
+	// On says routing may send to it: the provider is on and so is it.
+	// One off is still sent a request pinned to it (pinOff)
 	On bool `json:"on"`
 	// Models, asked for with ?models=1, are the ids of every model it can
 	// be asked for: its provider's whole list (Available), less a model on
 	// none of the provider's APIs and one the user's list for it leaves
 	// out (#474), and for a held key those the key may use. Each is sent
 	// as "<provider>/<id>", listed to agents or not (provider.Resolve).
-	Models []string `json:"models,omitempty"`
+	//
+	// With ?models=full they are the same models as /v1/models' rows
+	// ([]map[string]any, modelRows), each "id" its "<provider>/<id>"
+	// (@tmr11235: ids alone left a plugin without the names, levels,
+	// windows and prices of the models /v1/models doesn't list). The ids
+	// of ?models=1 stay strings: it shipped a day before, and a plugin
+	// reading them as strings would break on objects. Neither is given
+	// for an account with none.
+	Models any `json:"models,omitempty"`
 }
 
 // accountsList answers AccountsPath. It names the accounts as the quotas
@@ -59,25 +72,48 @@ func (s *Server) accountsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	only := strings.TrimSpace(r.URL.Query().Get("provider"))
-	withModels := queryYes(r.URL.Query().Get("models"))
-	out := []listedAccount{}
+	asked := r.URL.Query().Get("models")
+	full := strings.EqualFold(strings.TrimSpace(asked), "full")
+	withModels := full || queryYes(asked)
+	var ps []provider.Provider
 	for _, p := range provider.All() {
 		if only != "" && !strings.EqualFold(only, p.ID) {
 			continue
 		}
-		if !scope.provider(p.ID) {
-			continue
+		if scope.provider(p.ID) {
+			ps = append(ps, p)
 		}
+	}
+	// each provider's models, read once a provider; with ?models=full each
+	// model's row too, built over them all at once, as /v1/models builds
+	// its own over its list: one price reader, one Codex tier list, the
+	// labels told apart across providers
+	models := make([][]catalog.Model, len(ps))
+	var rows map[string]map[string]any
+	if withModels {
+		var es []provider.Entry
+		for i, p := range ps {
+			models[i] = modelsListed(p, scope)
+			if full {
+				es = append(es, provider.EntriesOf(p, models[i])...)
+			}
+		}
+		if full {
+			rs, labels := newModelRows(r, es), provider.LabelsFor(agentOf(r), es)
+			rows = make(map[string]map[string]any, len(es))
+			for i, e := range es {
+				rows[e.ID] = rs.row(e, labels[i])
+			}
+		}
+	}
+	out := []listedAccount{}
+	for i, p := range ps {
 		on := accountsOnNow(p)
 		keysOn := map[string]bool{}
 		if p.Account == nil {
 			for _, k := range p.KeyList() {
 				keysOn[k.ID] = k.On
 			}
-		}
-		var models []string
-		if withModels {
-			models = modelsListed(p, scope)
 		}
 		for _, a := range p.AccountIDs() {
 			if scope != nil && !scope.who.AllowsAccount(p.ID, a.ID) {
@@ -91,11 +127,22 @@ func (s *Server) accountsList(w http.ResponseWriter, r *http.Request) {
 				l.Kind, l.User, l.On = "account", a.User, on[strings.ToLower(a.User)] && !p.Off
 			}
 			if withModels {
-				l.Models = []string{}
-				for _, m := range models {
-					if p.AccountServes(ref, m) {
-						l.Models = append(l.Models, m)
+				var ids []string
+				var objs []map[string]any
+				for _, m := range models[i] {
+					if !p.AccountServes(ref, m.ID) {
+						continue
 					}
+					if rows != nil {
+						objs = append(objs, rows[p.ID+"/"+m.ID])
+					} else {
+						ids = append(ids, m.ID)
+					}
+				}
+				if len(objs) > 0 {
+					l.Models = objs
+				} else if len(ids) > 0 {
+					l.Models = ids
 				}
 			}
 			out = append(out, l)
@@ -113,17 +160,17 @@ func queryYes(v string) bool {
 	return false
 }
 
-// modelsListed is the ids of every model p can be asked for (Available,
-// read once a provider), less those on none of its APIs, and for a held
-// key those the key may use.
-func modelsListed(p provider.Provider, scope *quotaScope) []string {
+// modelsListed is every model p can be asked for (Available, read once a
+// provider), less those on none of its APIs, and for a held key those the
+// key may use.
+func modelsListed(p provider.Provider, scope *quotaScope) []catalog.Model {
 	noAPI := p.NoAPI()
-	var out []string
+	var out []catalog.Model
 	for _, m := range p.Available() {
 		if noAPI(m.ID) || scope != nil && !modelListed(scope.who, p, m.ID) {
 			continue
 		}
-		out = append(out, m.ID)
+		out = append(out, m)
 	}
 	return out
 }
@@ -214,4 +261,65 @@ func pinnedBy(ts []pinTarget, w Weighed, c *candidate) bool {
 		}
 	}
 	return false
+}
+
+// pinOff is the account or key a pin names (as pinTo matches one: its
+// user, a key's name, its stable id) that the user turned off, of a
+// provider routing planned for the request: a candidate made for this
+// request alone (provider.OffNamed), and its row for the trace, Unlisted
+// when the account's own list of models leaves the model out (#474).
+// tmr11235 on X: a plugin testing an account wants to before turning it
+// on, which puts it to work at once, as Test on account… can. It takes
+// what the provider's planned candidate for the model goes with (a
+// group's effort, fast), and nothing is written of it: routing still
+// leaves it out, and its failure rests nothing (candidate.off). Asked
+// only once no account planned is named: it reads logins.json.
+func pinOff(raw, want string, targets []pinTarget, cands []candidate, pl planned, from provider.Protocol) (candidate, Weighed, bool) {
+	seen := map[string]bool{}
+	for _, w := range append(slices.Clone(pl.order), pl.left...) {
+		k := strings.ToLower(w.Provider) + "/" + w.Model
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		p, err := provider.Find(w.Provider)
+		if err != nil {
+			continue
+		}
+		refs := []string{want, raw}
+		if pid, id, ok := strings.Cut(want, "/"); ok && strings.EqualFold(pid, p.ID) {
+			refs = append(refs, id)
+		}
+		for _, t := range targets {
+			if strings.EqualFold(t.provider, p.ID) {
+				refs = append(refs, t.user, t.key)
+			}
+		}
+		for _, ref := range refs {
+			o, ok := p.OffNamed(ref)
+			if !ok {
+				continue
+			}
+			c := candidate{model: w.Model}
+			if i := slices.IndexFunc(cands, func(c candidate) bool { return strings.EqualFold(c.p.ID, p.ID) && c.model == w.Model }); i >= 0 {
+				c = cands[i]
+			}
+			c.p, c.rest, c.rank, c.capped, c.noURL, c.reserve, c.seats, c.off = o.Provider, p.ID, 0, nil, "", 0, nil, true
+			served := o.KeyID
+			switch {
+			case o.KeyID != "":
+				c.rest += "#" + o.KeyID
+			case !o.Own:
+				c.rest += "@" + o.Account.User
+			}
+			if o.KeyID == "" {
+				served = o.Account.User
+			}
+			row := weighed(c, *p, weighing{}, w.Fallback, from)
+			row.Via = w.Via
+			row.Unlisted = !p.AccountServes(served, w.Model)
+			return c, row, true
+		}
+	}
+	return candidate{}, Weighed{}, false
 }

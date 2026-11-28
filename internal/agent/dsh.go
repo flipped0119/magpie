@@ -152,8 +152,9 @@ func dshAt(at place) *Agent {
 			// running or not: agent-default-model is read for new
 			// ones only (#2359)
 			notes = append(notes, noticeDsh1.String())
-		} else if Running(`DeepSeek Harness\.app/`, `(^|/)dsh( |$)`, `(^|/)deepseek-harness( |$)`) {
-			// deepseek-harness is the desktop app's executable on Linux
+		} else if Running(`DeepSeek Harness\.app/`, `DSH (NEXT|Desktop)\.app/`, `(^|/)dsh( |$)`, `(^|/)deepseek-harness( |$)`, `(^|/)dsh-desktop(-next)?( |$)`) {
+			// deepseek-harness is the desktop app's executable on Linux,
+			// dsh-desktop-next and dsh-desktop the community shells'
 			notes = append(notes, noticeDsh2.String())
 		}
 		if dshSearchesHere(dir) && !gateway.CanSearch() {
@@ -1175,6 +1176,11 @@ func dshReach(dir, gw string) string {
 			if p, ok := strings.CutSuffix(base, gw); ok && p != "" && loopbackWithPath(strings.TrimSuffix(p, "/")) {
 				return p + gw
 			}
+			// billion-context's prefix to the gateway where it was before
+			// its port moved: kept in front of where it is now (#7846)
+			if p := biliToMagpie(base); p != "" {
+				return p + gw
+			}
 		}
 	}
 	return gw
@@ -1934,6 +1940,12 @@ func dshPutProviders(providers *yaml.Node, on bool, models []catalog.Model, gw s
 	for _, m := range models {
 		byRoute[dshRouteOf(m)] = append(byRoute[dshRouteOf(m)], m)
 	}
+	type routeOf struct {
+		key string
+		cfg dshPiRoute
+		cur *yaml.Node
+	}
+	var routes []routeOf
 	for _, k := range dshKinds {
 		ms := byRoute[k.key]
 		if len(ms) == 0 && (k.key != dshRoute || len(models) > 0) {
@@ -1946,10 +1958,16 @@ func dshPutProviders(providers *yaml.Node, on bool, models []catalog.Model, gw s
 		if v := yamlKey(yamlKey(providers, k.key), "api"); v != nil && v.Kind == yaml.ScalarNode {
 			api = v.Value
 		}
+		routes = append(routes, routeOf{k.key, dshKindConfig(k, ms, api, gw), yamlKey(providers, k.key)})
+	}
+	cfgs, curs := make([]*dshPiRoute, len(routes)), make([]*yaml.Node, len(routes))
+	for i := range routes {
+		cfgs[i], curs[i] = &routes[i].cfg, routes[i].cur
+	}
+	dshOutputsKept(cfgs, curs)
+	for _, r := range routes {
 		var route yaml.Node
-		cfg := dshKindConfig(k, ms, api, gw)
-		cur := yamlKey(providers, k.key)
-		dshOutputsKept(&cfg, cur)
+		cfg, cur := r.cfg, r.cur
 		if err := route.Encode(cfg); err != nil {
 			return err
 		}
@@ -1964,7 +1982,7 @@ func dshPutProviders(providers *yaml.Node, on bool, models []catalog.Model, gw s
 				yamlSetKey(cur, route.Content[j].Value, route.Content[j+1])
 			}
 		} else {
-			yamlSetKey(providers, k.key, &route)
+			yamlSetKey(providers, r.key, &route)
 		}
 	}
 	return nil
@@ -2014,21 +2032,32 @@ func dshKeepCompat(cur, route *yaml.Node) {
 }
 
 // dshOutputsKept keeps a maxTokens the user typed into one of magpie's
-// models on route cur, in dsh's Models page or by hand, in r, the route as
-// magpie writes it (outputsKept). One record serves every file dsh keeps
-// the route in: what magpie wanted for a model is the same in each.
-func dshOutputsKept(r *dshPiRoute, cur *yaml.Node) {
+// models on routes curs, in dsh's Models page or by hand, in rs, the
+// routes as magpie writes them (outputsKept), rs[i] the one curs[i] is in
+// the file now. One record serves every route and every file dsh keeps
+// them in: what magpie wanted for a model is the same in each. Every
+// route goes in one call: a call a route wrote the record with only its
+// own models, so each sync wrote stash.json once a route, each dropping
+// what the routes before had recorded (and every cache built on the files
+// read with it), and a maxTokens typed into a model of any route but the
+// last had no record to stay by, and was written over.
+func dshOutputsKept(rs []*dshPiRoute, curs []*yaml.Node) {
 	want := map[string]int{}
-	for _, m := range r.Models {
-		if m.MaxTokens > 0 {
-			want[m.ID] = m.MaxTokens
+	for _, r := range rs {
+		for _, m := range r.Models {
+			if m.MaxTokens > 0 {
+				want[m.ID] = m.MaxTokens
+			}
 		}
 	}
 	if len(want) == 0 {
 		return
 	}
 	have := map[string]int{}
-	if cur != nil && cur.Kind == yaml.MappingNode {
+	for _, cur := range curs {
+		if cur == nil || cur.Kind != yaml.MappingNode {
+			continue
+		}
 		if ms := yamlKey(cur, "models"); ms != nil && ms.Kind == yaml.SequenceNode {
 			for _, m := range ms.Content {
 				id, mt := yamlKey(m, "id"), yamlKey(m, "maxTokens")
@@ -2040,9 +2069,11 @@ func dshOutputsKept(r *dshPiRoute, cur *yaml.Node) {
 		}
 	}
 	kept := outputsKept("dsh:routes", want, have)
-	for i := range r.Models {
-		if n := kept[r.Models[i].ID]; n > 0 {
-			r.Models[i].MaxTokens = n
+	for _, r := range rs {
+		for i := range r.Models {
+			if n := kept[r.Models[i].ID]; n > 0 {
+				r.Models[i].MaxTokens = n
+			}
 		}
 	}
 }
@@ -2193,6 +2224,43 @@ func dshRouteFor(id string, models []catalog.Model) string {
 		}
 	}
 	return dshRoute
+}
+
+// dshGroupAPIs are the APIs a routing group not on Responses
+// (provider.GroupAPI) goes on in dsh, and whether it is asked adaptively
+// on Messages: the APIs every member's own list has (modelAPIs), so a
+// group of members each best on Messages, or on Gemini's, goes on that
+// route as each would alone, every member relaying it as it is (01huadalang
+// on Discord: a group of Gemini CLI models went on Chat). A member every
+// request to is translated anyway has no say. Messages is left out when
+// the members don't all ask adaptively, or all not (gateway.AsksAdaptively,
+// which the group's id doesn't answer): pi-ai asks the group one way for
+// every member. A group whose members share neither has none and stays on
+// Chat. Gemini's is the first where dsh speaks it, and the one after, if
+// any, where it doesn't (dshAskedOne), as for a lone Gemini model.
+func dshGroupAPIs(ms []provider.Member) (apis []string, adaptive bool) {
+	found, split := false, false
+	for _, m := range ms {
+		own := modelAPIs(&m.Provider, m.Model)
+		if len(own) == 0 {
+			continue
+		}
+		asks := gateway.AsksAdaptively(m.Model)
+		if !found {
+			apis, adaptive, found = own, asks, true
+			continue
+		}
+		apis = slices.DeleteFunc(apis, func(a string) bool { return !slices.Contains(own, a) })
+		split = split || asks != adaptive
+	}
+	if split {
+		apis = slices.DeleteFunc(apis, func(a string) bool { return a == string(provider.Anthropic) })
+	}
+	apis = slices.DeleteFunc(apis, func(a string) bool { return a != string(provider.Anthropic) && a != string(provider.Gemini) })
+	if len(apis) == 0 {
+		return nil, false
+	}
+	return apis, adaptive && slices.Contains(apis, string(provider.Anthropic))
 }
 
 // dshAPI is the wire protocol a route of magpie's speaks, given the one it
@@ -2355,17 +2423,58 @@ func dshLevelsWith(list, ref string, gemini bool) []string {
 // didn't): a home there is read by that dsh, not by this machine's.
 var dshDistros sync.Map
 
-// dshAppVersion is the version of DeepSeek Harness Desktop installed here,
-// "" when there is none or it doesn't say; a var for tests.
-var dshAppVersion = func() string {
-	a := &Agent{ID: "dsh"}
-	if !a.HasApp() {
-		return ""
+// dshAppVersion is the version of dsh the desktop apps installed here run,
+// the oldest when there are several: DeepSeek Harness Desktop's own, a
+// community shell's the dsh it bundles (dshBundledVersion), not the shell's
+// (DSH NEXT 2.0.24-next runs dsh 0.2.2-rc.5); "" when there is none,
+// "unknown" when one doesn't say. A var for tests (dshAppsVersion).
+var dshAppVersion = dshAppsVersion
+
+// dshAppsVersion is dshAppVersion as it reads this machine.
+func dshAppsVersion() string {
+	oldest := ""
+	for i, b := range desktopApps["dsh"].builds() {
+		if !b.installed() {
+			continue
+		}
+		v := b.version()
+		if i > 0 {
+			v = dshBundledVersion(b)
+		}
+		if v == "" {
+			return "unknown"
+		}
+		if oldest == "" || Newer(oldest, v) {
+			oldest = v
+		}
 	}
-	if v := a.AppVersion(); v != "" {
-		return v
+	return oldest
+}
+
+// dshBundledVersion is the dsh a community shell's Mac bundle runs: the
+// @deepseek-ai/dsh its Contents/Resources/app/package.json pins (DSH
+// NEXT's mac extraResources); "" when no bundle of it says, or names a
+// range. Elsewhere that manifest is inside app.asar, so it is "".
+func dshBundledVersion(app desktopApp) string {
+	for _, bundle := range macBundles(app) {
+		if info, ok := bundleInfo(bundle); !ok || info.id != app.id {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(bundle, "Contents", "Resources", "app", "package.json"))
+		if err != nil {
+			continue
+		}
+		var m struct {
+			Dependencies map[string]string `json:"dependencies"`
+		}
+		if json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		if v := strings.TrimSpace(m.Dependencies["@deepseek-ai/dsh"]); v != "" && v[0] >= '0' && v[0] <= '9' {
+			return v
+		}
 	}
-	return "unknown"
+	return ""
 }
 
 // dshSpeaksGemini says every dsh that reads the dsh home holding path
@@ -2498,7 +2607,8 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 		// a Gemini 3 or later: #6778) is asked adaptively too: pi-ai then
 		// sends the level itself, max as max (gateway.AsksAdaptively, the
 		// rule Pi's models.json is written by too)
-		case api == "anthropic-messages" && gateway.AsksAdaptively(m.ID):
+		// (a routing group by its members, catalog.Model.AsksAdaptively)
+		case api == "anthropic-messages" && (gateway.AsksAdaptively(m.ID) || m.AsksAdaptively):
 			e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
 		case api == "openai-responses":
 			// by the api the route stands on (the one the user picked in
