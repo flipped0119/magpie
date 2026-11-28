@@ -7029,8 +7029,13 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		sent = provider.CodexCompressed(req, body)
 	}
 	var anthGzip *anthropicGzipAttempt
+	var respZstd *responsesZstdAttempt
 	if to == provider.Anthropic && dict == nil {
 		anthGzip, sent = maybeCompressAnthropicRequest(p, req, body)
+	} else if to == provider.Responses && dict == nil {
+		if att, zsent := maybeCompressResponsesRequest(p, req, body); att != nil {
+			respZstd, sent = att, zsent
+		}
 	}
 	// the bytes go on the wire whether the vendor answers or not, counted
 	// for the request's ledger row (#4456)
@@ -7055,6 +7060,9 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	}
 	if anthGzip != nil {
 		res, err = anthGzip.after(req, res, err, again)
+	}
+	if respZstd != nil {
+		res, err = respZstd.after(req, res, err, again)
 	}
 	if err == nil && res.StatusCode >= 400 && provider.OpenCodeURL(req.URL.String()) {
 		logOpenCodeRefusal(p, req, res.StatusCode)

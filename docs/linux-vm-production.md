@@ -20,7 +20,11 @@ upstream defaults unless configured (except safe bug fixes and zero-cost
 | `MAGPIE_CLAUDE_RANDOM_GATE` | `""` | Deterministic per-account, per-window randomized Claude stop line (e.g. `93-97` or `85-95`, FNV-64a over `(account, window, resetHour)`). Explicit per-account/per-window caps (and `100` exemptions) always take precedence. |
 | `MAGPIE_AFFINITY_DETOUR_HOLD` | `on` | Keeps warm session bindings intact during brief non-quota detours (`<=5m` Claude / `<=10m` Codex) or lane saturation (`laneMate`); set `off` to disable. |
 | `MAGPIE_CLAUDE_CONTEXT_BREAKPOINT` | `on` | Byte-splices a `1h` `cache_control` breakpoint onto the last leading `<system-reminder>` block in `messages[0].content` when all existing markers are `1h` and count is `1–3` so parallel subagents share workspace context cache; set `off` to disable. |
-| `MAGPIE_ANTHROPIC_OUTBOUND_GZIP` | `auto` | Outbound gzip compression for Anthropic `/v1/messages` bodies `>= 2 KiB` (`auto`: official Anthropic hosts; `all`: also third-party relays; `off`: disabled). Automatically retries uncompressed on 400/415 encoding rejection and latches the provider. |
+| `MAGPIE_ANTHROPIC_OUTBOUND_GZIP` | `auto` | Outbound gzip compression for Anthropic `/v1/messages` and `count_tokens` bodies `>= minBytes` (`auto`: official Anthropic hosts; `all`: also third-party relays; `off`: disabled). Automatically retries uncompressed on 415, non-origin 403, or 400/501 encoding rejection and latches the provider. |
+| `MAGPIE_ANTHROPIC_OUTBOUND_GZIP_LEVEL` | `6` | Outbound gzip compression level (`1`–`9`; `3` for lower CPU, `9` for maximum traffic savings). |
+| `MAGPIE_RESPONSES_OUTBOUND_ZSTD` | `auto` | Outbound zstd compression for OpenAI `/v1/responses` bodies `>= minBytes` outside ChatGPT Codex (`auto`: official `api.openai.com`; `all`: also third-party relays such as AsterGate; `off`: disabled). Automatically retries uncompressed on rejection and latches the provider. |
+| `MAGPIE_RESPONSES_OUTBOUND_ZSTD_LEVEL` | `default` | Outbound zstd level (`fastest`/`default`/`better`/`best` or `1`–`19`; default `SpeedDefault` ≈ level 3). |
+| `MAGPIE_OUTBOUND_COMPRESS_MIN_BYTES` | `2048` | Minimum uncompressed request body size (bytes) before outbound gzip/zstd compression is applied. |
 
 ## Linux VM `systemd` baseline (4–8 GiB RAM)
 

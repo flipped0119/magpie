@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -15,25 +16,73 @@ import (
 // Conditional outbound gzip compression for Anthropic Messages requests.
 //
 // Modes via MAGPIE_ANTHROPIC_OUTBOUND_GZIP:
-//   - "" / "auto" / "1" / "on" / "true" (default): compress requests >= 2 KiB
+//   - "" / "auto" / "1" / "on" / "true" (default): compress requests >= minBytes
 //     going to official Anthropic hosts (matching Claude Code 2.1.321+ wire
 //     behavior) without mutating third-party/relay payloads unexpectedly.
 //   - "all": also attempt gzip against third-party Anthropic-compatible relays.
 //   - "off" / "0" / "false": disabled.
 //
-// If an upstream rejects a gzip-encoded body (HTTP 400/415/501 mentioning
-// encoding/gzip/JSON parse failure), the gateway retries once uncompressed and
-// latches the provider ID so later requests go uncompressed directly.
-const anthropicGzipMinBytes = 2048
+// Optional tuning:
+//   - MAGPIE_ANTHROPIC_OUTBOUND_GZIP_LEVEL: gzip level 1..9 (default 6).
+//   - MAGPIE_OUTBOUND_COMPRESS_MIN_BYTES: minimum raw body size in bytes (default 2048).
+//
+// If an upstream rejects a gzip-encoded body (HTTP 415, non-origin 403, or
+// 400/501 mentioning encoding/gzip/JSON parse failure), the gateway retries
+// once uncompressed, restores req for downstream retry wrappers, and latches
+// the provider ID so later requests go uncompressed directly.
+const defaultOutboundCompressMinBytes = 2048
 
-var anthropicGzipWriters = sync.Pool{
-	New: func() any {
-		w, _ := gzip.NewWriterLevel(io.Discard, gzip.DefaultCompression)
-		return w
-	},
-}
+var (
+	anthropicGzipPoolsMu sync.Mutex
+	anthropicGzipPools   [10]*sync.Pool // indexed by level 1..9
+)
 
 var anthropicGzipRefused sync.Map // providerID -> struct{}
+
+func outboundCompressMinBytes() int {
+	raw := strings.TrimSpace(os.Getenv("MAGPIE_OUTBOUND_COMPRESS_MIN_BYTES"))
+	if raw == "" {
+		return defaultOutboundCompressMinBytes
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return defaultOutboundCompressMinBytes
+	}
+	return n
+}
+
+func anthropicGzipLevel() int {
+	raw := strings.TrimSpace(os.Getenv("MAGPIE_ANTHROPIC_OUTBOUND_GZIP_LEVEL"))
+	if raw == "" {
+		return gzip.DefaultCompression
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < gzip.BestSpeed || n > gzip.BestCompression {
+		return gzip.DefaultCompression
+	}
+	return n
+}
+
+func anthropicGzipPoolFor(level int) *sync.Pool {
+	idx := level
+	if idx < gzip.BestSpeed || idx > gzip.BestCompression {
+		idx = 6
+	}
+	anthropicGzipPoolsMu.Lock()
+	p := anthropicGzipPools[idx]
+	if p == nil {
+		lvl := level
+		p = &sync.Pool{
+			New: func() any {
+				w, _ := gzip.NewWriterLevel(io.Discard, lvl)
+				return w
+			},
+		}
+		anthropicGzipPools[idx] = p
+	}
+	anthropicGzipPoolsMu.Unlock()
+	return p
+}
 
 func anthropicGzipMode() string {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("MAGPIE_ANTHROPIC_OUTBOUND_GZIP")))
@@ -48,7 +97,7 @@ func anthropicGzipMode() string {
 }
 
 func shouldAnthropicGzip(p provider.Provider, req *http.Request, body []byte) bool {
-	if len(body) < anthropicGzipMinBytes || req == nil {
+	if req == nil || req.Method != http.MethodPost || len(body) < outboundCompressMinBytes() {
 		return false
 	}
 	if req.Header.Get("Content-Encoding") != "" {
@@ -77,12 +126,13 @@ func shouldAnthropicGzip(p provider.Provider, req *http.Request, body []byte) bo
 func gzipAnthropicBody(body []byte) ([]byte, bool) {
 	var buf bytes.Buffer
 	buf.Grow(len(body) / 3)
-	zw := anthropicGzipWriters.Get().(*gzip.Writer)
+	pool := anthropicGzipPoolFor(anthropicGzipLevel())
+	zw := pool.Get().(*gzip.Writer)
 	zw.Reset(&buf)
 	_, werr := zw.Write(body)
 	cerr := zw.Close()
 	zw.Reset(io.Discard)
-	anthropicGzipWriters.Put(zw)
+	pool.Put(zw)
 	if werr != nil || cerr != nil || buf.Len() >= len(body) {
 		return nil, false
 	}
@@ -117,14 +167,20 @@ func (a *anthropicGzipAttempt) after(req *http.Request, res *http.Response, err 
 	}
 	if res.StatusCode != http.StatusUnsupportedMediaType &&
 		res.StatusCode != http.StatusBadRequest &&
+		res.StatusCode != http.StatusForbidden &&
 		res.StatusCode != http.StatusNotImplemented {
+		return res, nil
+	}
+	origin := isAnthropicOriginResponse(res.Header)
+	if res.StatusCode == http.StatusForbidden && origin {
+		// Genuine Anthropic origin 403 (auth/permission) is not an encoding rejection.
 		return res, nil
 	}
 	peek, rerr := io.ReadAll(io.LimitReader(res.Body, 4096))
 	if rerr != nil {
 		return res, nil
 	}
-	if !anthropicGzipRejected(res.StatusCode, peek) {
+	if !anthropicGzipRejected(res.StatusCode, peek, origin) {
 		// Restore the peeked body so downstream error handling sees it intact.
 		res.Body = struct {
 			io.Reader
@@ -136,19 +192,49 @@ func (a *anthropicGzipAttempt) after(req *http.Request, res *http.Response, err 
 	if a.providerID != "" {
 		anthropicGzipRefused.Store(a.providerID, struct{}{})
 	}
+	// Restore req itself so later retry helpers (e.g. provider.RetryOneAuth)
+	// never resend gzip bytes to a provider that just rejected gzip.
+	restorePlainRequest(req, a.raw)
 	retryReq := req.Clone(req.Context())
-	retryReq.Header.Del("Content-Encoding")
-	retryReq.Body = io.NopCloser(bytes.NewReader(a.raw))
-	retryReq.ContentLength = int64(len(a.raw))
-	retryReq.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(a.raw)), nil
-	}
+	restorePlainRequest(retryReq, a.raw)
 	return again(retryReq)
 }
 
-func anthropicGzipRejected(status int, body []byte) bool {
+func restorePlainRequest(req *http.Request, raw []byte) {
+	if req == nil {
+		return
+	}
+	req.Header.Del("Content-Encoding")
+	req.Body = io.NopCloser(bytes.NewReader(raw))
+	req.ContentLength = int64(len(raw))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(raw)), nil
+	}
+}
+
+// isAnthropicOriginResponse checks upstream transport headers for evidence that
+// the response came from Anthropic's own origin rather than an intermediary/WAF.
+func isAnthropicOriginResponse(h http.Header) bool {
+	if h == nil {
+		return false
+	}
+	if strings.TrimSpace(h.Get("Cf-Ray")) != "" {
+		return true
+	}
+	for _, v := range h.Values("Request-Id") {
+		if strings.HasPrefix(strings.TrimSpace(v), "req_") {
+			return true
+		}
+	}
+	return false
+}
+
+func anthropicGzipRejected(status int, body []byte, origin bool) bool {
 	if status == http.StatusUnsupportedMediaType {
 		return true
+	}
+	if status == http.StatusForbidden {
+		return !origin
 	}
 	l := strings.ToLower(string(body))
 	for _, needle := range []string{
@@ -156,6 +242,9 @@ func anthropicGzipRejected(status int, body []byte) bool {
 		"gzip",
 		"unsupported encoding",
 		"could not parse the json",
+		"could not parse request body as json",
+		"request body is not valid json",
+		"bad json:",
 		"invalid json",
 		"unexpected token",
 		"invalid character '\\x1f'",
