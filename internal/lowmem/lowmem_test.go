@@ -43,6 +43,35 @@ func TestLowMemDefaultsAndOverrides(t *testing.T) {
 	if got := BlockPriceLinger(30 * time.Second); got != 5*time.Second {
 		t.Fatalf("lowmem BlockPriceLinger = %v, want 5s", got)
 	}
+	if got := InboundDecodeBudgetBytes(); got != 128<<20 {
+		t.Fatalf("lowmem default InboundDecodeBudgetBytes = %d, want 128 MiB", got)
+	}
+
+	// Soft memory limit scales default inbound decode budget (25%, clamped 32..256 MiB).
+	t.Setenv("MAGPIE_MEM_LIMIT_MB", "256")
+	if got := InboundDecodeBudgetBytes(); got != 64<<20 {
+		t.Fatalf("scaled InboundDecodeBudgetBytes = %d, want 64 MiB", got)
+	}
+	t.Setenv("MAGPIE_MEM_LIMIT_MB", "64")
+	if got := InboundDecodeBudgetBytes(); got != 32<<20 {
+		t.Fatalf("clamped-low InboundDecodeBudgetBytes = %d, want 32 MiB", got)
+	}
+	t.Setenv("MAGPIE_MEM_LIMIT_MB", "2048")
+	if got := InboundDecodeBudgetBytes(); got != 256<<20 {
+		t.Fatalf("clamped-high InboundDecodeBudgetBytes = %d, want 256 MiB", got)
+	}
+	t.Setenv("MAGPIE_MEM_LIMIT_MB", "")
+
+	// Explicit MAGPIE_INBOUND_DECODE_BUDGET_MB overrides and can disable even in lowmem.
+	t.Setenv("MAGPIE_INBOUND_DECODE_BUDGET_MB", "96")
+	if got := InboundDecodeBudgetBytes(); got != 96<<20 {
+		t.Fatalf("explicit InboundDecodeBudgetBytes = %d, want 96 MiB", got)
+	}
+	t.Setenv("MAGPIE_INBOUND_DECODE_BUDGET_MB", "off")
+	if got := InboundDecodeBudgetBytes(); got != 0 {
+		t.Fatalf("disabled InboundDecodeBudgetBytes = %d, want 0", got)
+	}
+	t.Setenv("MAGPIE_INBOUND_DECODE_BUDGET_MB", "")
 
 	// Explicit fine-grained overrides beat MAGPIE_LOW_MEMORY defaults.
 	t.Setenv("MAGPIE_CLAUDE_IDLE_MAX", "3")

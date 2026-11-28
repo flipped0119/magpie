@@ -1,7 +1,10 @@
 package gateway
 
 import (
+	"bytes"
 	"compress/gzip"
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/yetone/magpie/internal/lowmem"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -106,6 +110,12 @@ func (s *Server) readRequestBody(w http.ResponseWriter, r *http.Request, from pr
 		most = defaultBodyLimit
 	}
 	if n := r.ContentLength; n > 0 && n <= most {
+		if budget := inboundDecodeBudgetLimit(); budget > 0 && !inboundDecodeBudget.canFit(n, budget) {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Connection", "close")
+			writeError(w, from, http.StatusTooManyRequests, errInboundDecodeBudget.Error())
+			return nil, false
+		}
 		if err := bodyRoom.take(r.Context(), n); err != nil {
 			w.Header().Set("Connection", "close") // its body is left unread
 			writeError(w, from, http.StatusServiceUnavailable, err.Error())
@@ -221,6 +231,151 @@ func (z *pooledZstd) Close() error {
 	return nil
 }
 
+// errInboundDecodeBudget is returned with HTTP 429 when concurrent inbound
+// request read/decompression bytes exceed the configured low-memory budget.
+var errInboundDecodeBudget = errors.New("inbound request decode memory budget exhausted; retry shortly")
+
+type decodeBudgetT struct {
+	mu        sync.Mutex
+	inFlight  int64
+	testLimit int64 // >0 overrides lowmem.InboundDecodeBudgetBytes() in tests
+}
+
+var inboundDecodeBudget = &decodeBudgetT{}
+
+func inboundDecodeBudgetLimit() int64 {
+	inboundDecodeBudget.mu.Lock()
+	tl := inboundDecodeBudget.testLimit
+	inboundDecodeBudget.mu.Unlock()
+	if tl > 0 {
+		return tl
+	}
+	return lowmem.InboundDecodeBudgetBytes()
+}
+
+func (b *decodeBudgetT) canFit(n, limit int64) bool {
+	if limit <= 0 || n <= 0 {
+		return true
+	}
+	b.mu.Lock()
+	ok := b.inFlight+n <= limit
+	b.mu.Unlock()
+	return ok
+}
+
+func (b *decodeBudgetT) current() int64 {
+	b.mu.Lock()
+	v := b.inFlight
+	b.mu.Unlock()
+	return v
+}
+
+type decodeLease struct {
+	b     *decodeBudgetT
+	limit int64
+	held  int64 // guarded by b.mu
+}
+
+func (l *decodeLease) reserveTo(total int64) bool {
+	if l == nil || l.limit <= 0 || total <= 0 {
+		return true
+	}
+	l.b.mu.Lock()
+	defer l.b.mu.Unlock()
+	if total <= l.held {
+		return true
+	}
+	delta := total - l.held
+	if l.b.inFlight+delta > l.limit {
+		return false
+	}
+	l.b.inFlight += delta
+	l.held = total
+	return true
+}
+
+func (l *decodeLease) shrinkTo(total int64) {
+	if l == nil || l.limit <= 0 {
+		return
+	}
+	if total < 0 {
+		total = 0
+	}
+	l.b.mu.Lock()
+	defer l.b.mu.Unlock()
+	if total >= l.held {
+		return
+	}
+	l.b.inFlight -= l.held - total
+	l.held = total
+}
+
+func (l *decodeLease) heldBytes() int64 {
+	if l == nil {
+		return 0
+	}
+	l.b.mu.Lock()
+	v := l.held
+	l.b.mu.Unlock()
+	return v
+}
+
+func (l *decodeLease) release() {
+	if l == nil {
+		return
+	}
+	l.b.mu.Lock()
+	if l.held > 0 {
+		l.b.inFlight -= l.held
+		l.held = 0
+	}
+	l.b.mu.Unlock()
+}
+
+type budgetedReader struct {
+	r     io.Reader
+	lease *decodeLease
+	base  int64
+	read  int64
+}
+
+func (b *budgetedReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if n > 0 {
+		b.read += int64(n)
+		if !b.lease.reserveTo(b.base + b.read) {
+			return n, errInboundDecodeBudget
+		}
+	}
+	return n, err
+}
+
+// gzipAnnouncedSize reads the 32-bit gzip trailer ISIZE when the wire buffer
+// has a valid gzip magic header and the announced size is bounded by limit.
+func gzipAnnouncedSize(wire []byte, limit int64) (int64, bool) {
+	if len(wire) < 18 || wire[0] != 0x1f || wire[1] != 0x8b || limit >= 1<<32 {
+		return 0, false
+	}
+	isize := int64(binary.LittleEndian.Uint32(wire[len(wire)-4:]))
+	if isize <= 0 || isize > limit {
+		return 0, false
+	}
+	return isize, true
+}
+
+// zstdAnnouncedSize parses the first zstd frame header to read its
+// FrameContentSize when present and bounded by limit.
+func zstdAnnouncedSize(head []byte, limit int64) (int64, bool) {
+	if len(head) < 4 {
+		return 0, false
+	}
+	var hdr zstd.Header
+	if hdr.Decode(head) != nil || !hdr.HasFCS || hdr.FrameContentSize == 0 || hdr.FrameContentSize > uint64(limit) {
+		return 0, false
+	}
+	return int64(hdr.FrameContentSize), true
+}
+
 // Read one bounded body, decoded; callers choose their protocol's error
 // envelope. The limit holds for the decoded bytes too.
 func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits requestLimits) ([]byte, int, error) {
@@ -244,6 +399,23 @@ func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits reque
 	if r.ContentLength > limits.body {
 		return reject(http.StatusRequestEntityTooLarge, overLimit(limits.body))
 	}
+	var lease *decodeLease
+	keepLease := false
+	if budget := inboundDecodeBudgetLimit(); budget > 0 {
+		lease = &decodeLease{b: inboundDecodeBudget, limit: budget}
+		defer func() {
+			if !keepLease {
+				lease.release()
+			}
+		}()
+	}
+	rejectBudget := func() ([]byte, int, error) {
+		w.Header().Set("Retry-After", "1")
+		return reject(http.StatusTooManyRequests, errInboundDecodeBudget)
+	}
+	if lease != nil && r.ContentLength > 0 && !lease.reserveTo(min(r.ContentLength, limits.body)) {
+		return rejectBudget()
+	}
 	if err := controller.SetReadDeadline(time.Now().Add(limits.readTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return reject(http.StatusInternalServerError, errors.New("could not set request body deadline"))
 	}
@@ -255,14 +427,90 @@ func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits reque
 		}
 		return reject(http.StatusBadRequest, err)
 	}
+	enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
 	// the wire length is the body's length only when it is sent as it is
 	declared := r.ContentLength
-	if enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc != "" && enc != "identity" {
+	if enc != "" && enc != "identity" {
 		declared = -1
 	}
 	original := r.Body
 	r.Body = &idleBody{original, controller, limits.readTimeout}
 	defer func() { r.Body = original }()
+
+	finishLease := func(body []byte) {
+		if lease == nil {
+			return
+		}
+		lease.shrinkTo(int64(len(body)))
+		if ctx := r.Context(); ctx != nil && ctx.Done() != nil && lease.heldBytes() > 0 {
+			keepLease = true
+			context.AfterFunc(ctx, lease.release)
+		}
+	}
+
+	// Under low-memory / explicit inbound decode budget, pre-check gzip ISIZE
+	// from the bounded compressed wire payload before decompressing.
+	if lease != nil && (enc == "gzip" || enc == "x-gzip") {
+		wireSrc := &budgetedReader{r: io.LimitReader(r.Body, limits.body+1), lease: lease}
+		wire, err := readSized(wireSrc, r.ContentLength)
+		if errors.Is(err, errInboundDecodeBudget) {
+			return rejectBudget()
+		}
+		if int64(len(wire)) > limits.body {
+			return reject(http.StatusRequestEntityTooLarge, overLimit(limits.body))
+		}
+		if err != nil {
+			return readFailure(err)
+		}
+		gzipHint := int64(-1)
+		if isize, ok := gzipAnnouncedSize(wire, limits.body); ok {
+			gzipHint = isize
+			if !lease.reserveTo(int64(len(wire)) + isize) {
+				return rejectBudget()
+			}
+		}
+		g, err := gzip.NewReader(bytes.NewReader(wire))
+		if err != nil {
+			return readFailure(fmt.Errorf("request body is not gzip: %w", err))
+		}
+		defer g.Close()
+		r.Header.Del("Content-Encoding")
+		decSrc := &budgetedReader{r: io.LimitReader(g, limits.body+1), lease: lease, base: int64(len(wire))}
+		body, err := readSized(decSrc, gzipHint)
+		if errors.Is(err, errInboundDecodeBudget) {
+			return rejectBudget()
+		}
+		if int64(len(body)) > limits.body {
+			return reject(http.StatusRequestEntityTooLarge, overLimit(limits.body))
+		}
+		if err != nil {
+			return readFailure(err)
+		}
+		finishLease(body)
+		return textBody(r.Header, body), 0, nil
+	}
+
+	// Under low-memory / explicit inbound decode budget, peek the first zstd
+	// frame header (<= 18 bytes) to pre-check FrameContentSize before decoding.
+	if lease != nil && enc == "zstd" {
+		var headBuf [18]byte
+		hn, herr := io.ReadFull(r.Body, headBuf[:])
+		if herr != nil && !errors.Is(herr, io.EOF) && !errors.Is(herr, io.ErrUnexpectedEOF) {
+			return readFailure(herr)
+		}
+		head := headBuf[:hn]
+		if fcs, ok := zstdAnnouncedSize(head, limits.body); ok {
+			declared = fcs
+			if !lease.reserveTo(fcs) {
+				return rejectBudget()
+			}
+		}
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), r.Body), r.Body}
+	}
+
 	rd, err := decodedBody(r)
 	if errors.Is(err, errBodyEncoding) {
 		return reject(http.StatusUnsupportedMediaType, err)
@@ -272,13 +520,21 @@ func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits reque
 	}
 	defer rd.Close()
 	// Limit decoded bytes as well.
-	body, err := readSized(io.LimitReader(rd, limits.body+1), declared)
+	var src io.Reader = io.LimitReader(rd, limits.body+1)
+	if lease != nil {
+		src = &budgetedReader{r: src, lease: lease}
+	}
+	body, err := readSized(src, declared)
+	if errors.Is(err, errInboundDecodeBudget) {
+		return rejectBudget()
+	}
 	if int64(len(body)) > limits.body {
 		return reject(http.StatusRequestEntityTooLarge, overLimit(limits.body))
 	}
 	if err != nil {
 		return readFailure(err)
 	}
+	finishLease(body)
 	// text that isn't, as U+FFFD, before anything routes or forwards it
 	// (textBody, laincatx on X)
 	return textBody(r.Header, body), 0, nil

@@ -126,6 +126,31 @@ func BlockPriceLinger(def time.Duration) time.Duration {
 	return def
 }
 
+// InboundDecodeBudgetBytes returns the concurrent inbound request read/decode
+// byte budget for the gateway (0 means unlimited, preserving upstream default
+// behavior). Active only when MAGPIE_INBOUND_DECODE_BUDGET_MB (>0) is set or
+// MAGPIE_LOW_MEMORY is enabled (explicitly setting MAGPIE_INBOUND_DECODE_BUDGET_MB
+// to 0/off disables it even under low-memory mode).
+func InboundDecodeBudgetBytes() int64 {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("MAGPIE_INBOUND_DECODE_BUDGET_MB")))
+	switch raw {
+	case "0", "off", "false", "no":
+		return 0
+	}
+	if raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return int64(n) * mib
+		}
+	}
+	if !Enabled() {
+		return 0
+	}
+	if mb := positiveEnvInt("MAGPIE_MEM_LIMIT_MB"); mb > 0 {
+		return clampInt64(int64(mb)*mib/4, 32*mib, 256*mib)
+	}
+	return 128 * mib
+}
+
 func positiveEnvInt(name string) int {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
